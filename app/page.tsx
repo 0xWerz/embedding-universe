@@ -1,6 +1,25 @@
 "use client";
 
-import { useState, useEffect, useRef, useCallback } from "react";
+import React, { useState, useEffect, useRef, useCallback } from "react";
+import { motion, AnimatePresence } from "framer-motion";
+import { 
+  Maximize, 
+  Minimize, 
+  RotateCcw, 
+  Trash2, 
+  Plus, 
+  Search, 
+  Info, 
+  X, 
+  Settings2,
+  Share2,
+  MousePointer2,
+  Move,
+  ZoomIn
+} from "lucide-react";
+import { cn } from "@/lib/utils";
+
+// --- Types ---
 
 interface WordNode {
   id: string;
@@ -10,7 +29,6 @@ interface WordNode {
   y: number;
   color: string;
   connections: string[];
-  cluster?: number;
 }
 
 interface Connection {
@@ -25,154 +43,142 @@ interface ViewState {
   scale: number;
 }
 
+// --- Constants ---
+
 const COLORS = [
-  "#8B5CF6", // Purple
-  "#06B6D4", // Cyan
-  "#10B981", // Emerald
-  "#F59E0B", // Amber
-  "#EF4444", // Red
-  "#EC4899", // Pink
-  "#6366F1", // Indigo
-  "#84CC16", // Lime
-  "#F97316", // Orange
-  "#14B8A6", // Teal
-  "#3B82F6", // Blue
-  "#A855F7", // Violet
-  "#22C55E", // Green
-  "#F43F5E", // Rose
+  "#C084FC", // Purple
+  "#22D3EE", // Cyan
+  "#34D399", // Emerald
+  "#FBBF24", // Amber
+  "#F87171", // Red
+  "#F472B6", // Pink
+  "#818CF8", // Indigo
+  "#A3E635", // Lime
+  "#FB923C", // Orange
+  "#2DD4BF", // Teal
+  "#60A5FA", // Blue
+  "#A78BFA", // Violet
 ];
 
+const THEME = {
+  gridColor: "rgba(255, 255, 255, 0.03)",
+  nodeBaseSize: 24,
+  nodeHoverScale: 1.2,
+};
+
+// --- Components ---
+
 export default function EmbeddingPage() {
+  // -- State --
   const [inputText, setInputText] = useState("");
   const [words, setWords] = useState<WordNode[]>([]);
   const [connections, setConnections] = useState<Connection[]>([]);
+  const [viewState, setViewState] = useState<ViewState>({ x: 0, y: 0, scale: 1 });
   const [hoveredWord, setHoveredWord] = useState<string | null>(null);
-  const [hoveredConnection, setHoveredConnection] = useState<string | null>(
-    null
-  );
+  const [hoveredConnection, setHoveredConnection] = useState<string | null>(null);
+  
+  // UI State
   const [loading, setLoading] = useState(false);
+  const [initializing, setInitializing] = useState(false);
   const [error, setError] = useState("");
-  const [isInitializingModel, setIsInitializingModel] = useState(false);
+  const [showHelp, setShowHelp] = useState(true);
+  const [sidebarOpen, setSidebarOpen] = useState(true);
 
-  // Cache the pipeline to avoid re-initialization
+  // Interaction State
+  const [isDragging, setIsDragging] = useState(false);
+  const [dragStart, setDragStart] = useState({ x: 0, y: 0 });
+
+  // Refs
+  const containerRef = useRef<HTMLDivElement>(null);
   const pipelineRef = useRef<any>(null);
-  const [viewState, setViewState] = useState<ViewState>({
-    x: 400, // Center horizontally (approximate)
-    y: 300, // Center vertically (approximate)
-    scale: 1,
-  });
 
-  // Initialize view state when container is available
+  // -- Initialization --
+
   useEffect(() => {
     if (containerRef.current) {
-      const containerWidth = containerRef.current.clientWidth;
-      const containerHeight = containerRef.current.clientHeight;
-
+      const { clientWidth, clientHeight } = containerRef.current;
       setViewState({
-        x: containerWidth / 2,
-        y: containerHeight / 2,
+        x: clientWidth / 2,
+        y: clientHeight / 2,
         scale: 1,
       });
     }
   }, []);
-  const [isDragging, setIsDragging] = useState(false);
-  const [dragStart, setDragStart] = useState({ x: 0, y: 0 });
-  const [showClusters, setShowClusters] = useState(false);
-  const [showInstructions, setShowInstructions] = useState(true);
 
-  const svgRef = useRef<SVGSVGElement>(null);
-  const containerRef = useRef<HTMLDivElement>(null);
+  // -- Logic --
 
   const getEmbedding = async (text: string): Promise<number[]> => {
     const { pipeline } = await import("@huggingface/transformers");
 
-    // Use cached pipeline if available
     if (!pipelineRef.current) {
-      // Show initialization status
-      setIsInitializingModel(true);
-
-      // Create and cache embedding pipeline
+      setInitializing(true);
       pipelineRef.current = await pipeline(
         "feature-extraction",
         "Xenova/all-MiniLM-L6-v2",
-        {
-          dtype: "q8", // Use 8-bit quantization for better performance
-          device: "wasm", // Use WebAssembly for compatibility
-        }
+        { dtype: "q8", device: "wasm" }
       );
-
-      // Hide initialization status when done
-      setIsInitializingModel(false);
+      setInitializing(false);
     }
 
-    // Get embeddings using cached pipeline
     const output = await pipelineRef.current(text, {
       pooling: "mean",
       normalize: true,
     });
 
-    // Convert to flat array
     return Array.from(output.data);
   };
 
-  const cosineSimilarity = (a: number[], b: number[]): number => {
-    const dotProduct = a.reduce((sum, val, i) => sum + val * b[i], 0);
-    const normA = Math.sqrt(a.reduce((sum, val) => sum + val * val, 0));
-    const normB = Math.sqrt(b.reduce((sum, val) => sum + val * val, 0));
-    return dotProduct / (normA * normB);
+  const cosineSimilarity = (a: number[], b: number[]) => {
+    let dot = 0;
+    let normA = 0;
+    let normB = 0;
+    for (let i = 0; i < a.length; i++) {
+      dot += a[i] * b[i];
+      normA += a[i] * a[i];
+      normB += b[i] * b[i];
+    }
+    return dot / (Math.sqrt(normA) * Math.sqrt(normB));
   };
 
-  // Force-directed layout for better positioning
-  const generatePosition = useCallback(
-    (embedding: number[], existingWords: WordNode[]) => {
-      if (existingWords.length === 0) {
-        // Start the first word at center (0, 0)
-        return { x: 0, y: 0 };
-      }
+  const generatePosition = useCallback((embedding: number[], existingWords: WordNode[]) => {
+    if (existingWords.length === 0) return { x: 0, y: 0 };
 
-      // Calculate similarities and find the best position
-      const similarities = existingWords.map((word) => ({
-        word,
-        similarity: cosineSimilarity(embedding, word.embedding),
-      }));
+    const similarities = existingWords.map((word) => ({
+      word,
+      similarity: cosineSimilarity(embedding, word.embedding),
+    })).sort((a, b) => b.similarity - a.similarity);
 
-      // Sort by similarity (highest first)
-      similarities.sort((a, b) => b.similarity - a.similarity);
-
-      // Find the most similar word
-      const mostSimilar = similarities[0];
-
-      if (mostSimilar.similarity > 0.2) {
-        // Position based on similarity - closer = more similar
-        // Map similarity (0.2-1.0) to distance (400-60)
-        const normalizedSim = (mostSimilar.similarity - 0.2) / 0.8;
-        const baseDistance = 400 - normalizedSim * 340; // 400 to 60 pixels
-
-        // Add some angle variation for visual appeal
-        const angle = Math.random() * Math.PI * 2;
-        const distance = baseDistance + (Math.random() - 0.5) * 30;
-
-        return {
-          x: mostSimilar.word.x + Math.cos(angle) * distance,
-          y: mostSimilar.word.y + Math.sin(angle) * distance,
-        };
-      }
-
-      // If no strong similarity, position away from existing words
-      const spread = Math.max(400, Math.sqrt(existingWords.length) * 250);
+    const mostSimilar = similarities[0];
+    
+    // Create a semantic map where distance roughly correlates to dissimilarity
+    if (mostSimilar.similarity > 0.15) {
+      const normalizedSim = (mostSimilar.similarity - 0.15) / 0.85;
+      // Closer similarity = smaller distance. 
+      // We use a non-linear scale to separate clusters better
+      const distance = 400 * (1 - Math.pow(normalizedSim, 1.5)) + 60; 
+      
+      // Add randomness to angle to prevent lines
+      const angle = Math.random() * Math.PI * 2;
+      
       return {
-        x: (Math.random() - 0.5) * spread,
-        y: (Math.random() - 0.5) * spread,
+        x: mostSimilar.word.x + Math.cos(angle) * distance,
+        y: mostSimilar.word.y + Math.sin(angle) * distance,
       };
-    },
-    []
-  );
+    }
+
+    // If not similar to anything, push it far away in a random direction
+    const spread = Math.max(500, Math.sqrt(existingWords.length) * 300);
+    const angle = Math.random() * Math.PI * 2;
+    return {
+      x: Math.cos(angle) * spread,
+      y: Math.sin(angle) * spread,
+    };
+  }, []);
 
   const addWord = async (text: string) => {
-    if (
-      !text.trim() ||
-      words.some((w) => w.text.toLowerCase() === text.toLowerCase())
-    ) {
+    if (!text.trim()) return;
+    if (words.some(w => w.text.toLowerCase() === text.toLowerCase())) {
+      setInputText(""); 
       return;
     }
 
@@ -182,11 +188,14 @@ export default function EmbeddingPage() {
     try {
       const embedding = await getEmbedding(text);
       const position = generatePosition(embedding, words);
+      
+      // Assign a color based on cluster/position or just cycle for now
+      // Ideally we'd do K-means but simple cycling works for visual distinction
       const color = COLORS[words.length % COLORS.length];
 
       const newWord: WordNode = {
         id: Date.now().toString(),
-        text: text,
+        text,
         embedding,
         x: position.x,
         y: position.y,
@@ -194,492 +203,429 @@ export default function EmbeddingPage() {
         connections: [],
       };
 
-      const updatedWords = [...words, newWord];
       const newConnections: Connection[] = [];
-
-      // Calculate connections - show more relationships
-      for (const existingWord of words) {
-        const similarity = cosineSimilarity(embedding, existingWord.embedding);
-        if (similarity > 0.2) {
-          // Much lower threshold for better connectivity
-          newConnections.push({
-            from: existingWord.id,
-            to: newWord.id,
-            similarity,
-          });
-          existingWord.connections.push(newWord.id);
-          newWord.connections.push(existingWord.id);
+      
+      words.forEach(existing => {
+        const sim = cosineSimilarity(embedding, existing.embedding);
+        if (sim > 0.25) { // Connection threshold
+          newConnections.push({ from: existing.id, to: newWord.id, similarity: sim });
+          existing.connections.push(newWord.id);
+          newWord.connections.push(existing.id);
         }
-      }
+      });
 
-      setWords(updatedWords);
-      setConnections((prev) => [...prev, ...newConnections]);
+      setWords(prev => [...prev, newWord]);
+      setConnections(prev => [...prev, ...newConnections]);
       setInputText("");
-
-      // Auto-center view if this is the first word
-      if (updatedWords.length === 1) {
-        setTimeout(() => {
-          resetView();
-        }, 100);
+      
+      if (words.length === 0) {
+         // Wait for render then center
+         setTimeout(() => resetView(), 50);
       }
+      
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to add word");
+      console.error(err);
+      setError("Failed to generate embedding. Check console.");
     } finally {
       setLoading(false);
     }
   };
 
-  const clearAll = () => {
-    setWords([]);
-    setConnections([]);
-    setHoveredWord(null);
-    setHoveredConnection(null);
-    setError("");
-    resetView();
-  };
+  // -- Interaction Handlers --
 
-  const getVisibleConnections = () => {
-    // Always show medium+ connections, highlight when hovered
-    if (!hoveredWord) {
-      return connections.filter((conn) => conn.similarity > 0.3); // Show medium+ connections
-    }
-
-    // Show all connections for the hovered word
-    return connections.filter(
-      (conn) => conn.from === hoveredWord || conn.to === hoveredWord
-    );
-  };
-
-  const handleKeyPress = (e: React.KeyboardEvent) => {
-    if (e.key === "Enter" && !loading) {
-      addWord(inputText);
-    }
-  };
-
-  // Mouse/touch handlers for pan and zoom
   const handleMouseDown = (e: React.MouseEvent) => {
-    // Don't start dragging if clicking on a word bubble
-    if (
-      (e.target as Element).tagName === "circle" ||
-      (e.target as Element).tagName === "text"
-    ) {
-      return;
-    }
-    e.preventDefault();
+    // Ignore clicks on UI elements (bubbled up)
+    if ((e.target as HTMLElement).closest('button') || (e.target as HTMLElement).closest('input')) return;
+    
     setIsDragging(true);
     setDragStart({ x: e.clientX - viewState.x, y: e.clientY - viewState.y });
   };
 
   const handleMouseMove = (e: React.MouseEvent) => {
     if (isDragging) {
-      setViewState((prev) => ({
+      setViewState(prev => ({
         ...prev,
         x: e.clientX - dragStart.x,
-        y: e.clientY - dragStart.y,
+        y: e.clientY - dragStart.y
       }));
     }
-  };
-
-  const handleMouseUp = () => {
-    setIsDragging(false);
-  };
-
-  const handleMouseLeave = () => {
-    setIsDragging(false);
   };
 
   const handleWheel = (e: React.WheelEvent) => {
-    e.preventDefault();
     const delta = e.deltaY > 0 ? 0.9 : 1.1;
-    const newScale = Math.max(0.1, Math.min(3, viewState.scale * delta));
-
+    const newScale = Math.max(0.1, Math.min(4, viewState.scale * delta));
+    
+    // Zoom towards mouse pointer could be implemented here, 
+    // but center zoom is easier for now
     const rect = containerRef.current?.getBoundingClientRect();
-    if (rect) {
-      const centerX = rect.width / 2;
-      const centerY = rect.height / 2;
+    if (!rect) return;
 
-      setViewState((prev) => ({
+    // Simple center zoom correction
+    const centerX = rect.width / 2;
+    const centerY = rect.height / 2;
+    
+    setViewState(prev => ({
         x: centerX - (centerX - prev.x) * (newScale / prev.scale),
         y: centerY - (centerY - prev.y) * (newScale / prev.scale),
-        scale: newScale,
-      }));
-    }
+        scale: newScale
+    }));
   };
 
   const resetView = () => {
-    if (words.length > 0) {
-      const avgX = words.reduce((sum, w) => sum + w.x, 0) / words.length;
-      const avgY = words.reduce((sum, w) => sum + w.y, 0) / words.length;
-
-      const containerWidth = containerRef.current?.clientWidth || 800;
-      const containerHeight = containerRef.current?.clientHeight || 600;
-
-      setViewState({
-        x: -avgX + containerWidth / 2,
-        y: -avgY + containerHeight / 2,
-        scale: 1,
-      });
-    } else {
-      const containerWidth = containerRef.current?.clientWidth || 800;
-      const containerHeight = containerRef.current?.clientHeight || 600;
-
-      setViewState({
-        x: containerWidth / 2,
-        y: containerHeight / 2,
-        scale: 1,
-      });
+    if (!containerRef.current) return;
+    
+    const { clientWidth, clientHeight } = containerRef.current;
+    
+    if (words.length === 0) {
+      setViewState({ x: clientWidth / 2, y: clientHeight / 2, scale: 1 });
+      return;
     }
+
+    // Calculate bounding box of all words
+    const xs = words.map(w => w.x);
+    const ys = words.map(w => w.y);
+    const minX = Math.min(...xs);
+    const maxX = Math.max(...xs);
+    const minY = Math.min(...ys);
+    const maxY = Math.max(...ys);
+
+    const centerX = (minX + maxX) / 2;
+    const centerY = (minY + maxY) / 2;
+    
+    setViewState({
+      x: clientWidth / 2 - centerX,
+      y: clientHeight / 2 - centerY,
+      scale: 0.8, // Start slightly zoomed out to see context
+    });
   };
 
-  return (
-    <div className="h-screen bg-black flex flex-col overflow-hidden">
-      {/* Header */}
-      <div className="flex-shrink-0 bg-zinc-950/80 backdrop-blur-sm border-b border-zinc-800 p-4">
-        <div className="flex items-center justify-between max-w-7xl mx-auto">
-          <div>
-            <h1 className="text-2xl font-bold text-zinc-100">
-              Embedding Universe
-            </h1>
-            <p className="text-zinc-500 text-sm">
-              Explore infinite semantic space
-            </p>
-          </div>
+  const clearAll = () => {
+    setWords([]);
+    setConnections([]);
+    setHoveredWord(null);
+    resetView();
+  };
 
-          <div className="flex items-center gap-4">
-            <button
-              onClick={() => setShowInstructions(!showInstructions)}
-              className="text-zinc-500 hover:text-zinc-300 transition-colors"
-            >
-              Help
-            </button>
-            <button
-              onClick={resetView}
-              className="bg-zinc-800 text-zinc-100 px-4 py-2 rounded-md hover:bg-zinc-700 transition-colors"
-            >
-              Reset View
-            </button>
-            <button
-              onClick={clearAll}
-              className="bg-red-900 text-zinc-100 px-4 py-2 rounded-md hover:bg-red-800 transition-colors"
-            >
-              Clear All
-            </button>
-          </div>
-        </div>
+  // -- Rendering Helpers --
+
+  // Filter connections for performance and clarity
+  const visibleConnections = React.useMemo(() => {
+    if (hoveredWord) {
+      return connections.filter(c => c.from === hoveredWord || c.to === hoveredWord);
+    }
+    // Show only stronger connections by default to reduce noise
+    return connections.filter(c => c.similarity > 0.4); 
+  }, [connections, hoveredWord]);
+
+  return (
+    <div className="relative w-full h-screen bg-black text-foreground overflow-hidden font-sans">
+      
+      {/* --- Canvas Layer --- */}
+      <div 
+        ref={containerRef}
+        className="absolute inset-0 cursor-grab active:cursor-grabbing"
+        onMouseDown={handleMouseDown}
+        onMouseMove={handleMouseMove}
+        onMouseUp={() => setIsDragging(false)}
+        onMouseLeave={() => setIsDragging(false)}
+        onWheel={handleWheel}
+      >
+        <svg width="100%" height="100%" className="w-full h-full block touch-none">
+          <defs>
+            <pattern id="grid" width="60" height="60" patternUnits="userSpaceOnUse"
+              patternTransform={`scale(${viewState.scale}) translate(${viewState.x/viewState.scale} ${viewState.y/viewState.scale})`}>
+              <path d="M 60 0 L 0 0 0 60" fill="none" stroke={THEME.gridColor} strokeWidth="1" />
+            </pattern>
+            <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+              <feGaussianBlur stdDeviation="4" result="coloredBlur" />
+              <feMerge>
+                <feMergeNode in="coloredBlur" />
+                <feMergeNode in="SourceGraphic" />
+              </feMerge>
+            </filter>
+          </defs>
+
+          <rect width="100%" height="100%" fill="url(#grid)" />
+
+          <g transform={`translate(${viewState.x}, ${viewState.y}) scale(${viewState.scale})`}>
+            
+            {/* Connections */}
+            <AnimatePresence>
+              {visibleConnections.map((conn) => {
+                 const fromNode = words.find(w => w.id === conn.from);
+                 const toNode = words.find(w => w.id === conn.to);
+                 if (!fromNode || !toNode) return null;
+                 
+                 const isHovered = hoveredConnection === `${conn.from}-${conn.to}` || 
+                                   hoveredWord === conn.from || 
+                                   hoveredWord === conn.to;
+
+                 return (
+                   <motion.line
+                     key={`${conn.from}-${conn.to}`}
+                     initial={{ opacity: 0 }}
+                     animate={{ 
+                       opacity: isHovered ? 1 : Math.max(0.1, conn.similarity - 0.2),
+                       strokeWidth: isHovered ? 2 : Math.max(0.5, conn.similarity * 2)
+                     }}
+                     exit={{ opacity: 0 }}
+                     x1={fromNode.x} y1={fromNode.y}
+                     x2={toNode.x} y2={toNode.y}
+                     stroke={isHovered ? "#fff" : fromNode.color}
+                     strokeLinecap="round"
+                   />
+                 );
+              })}
+            </AnimatePresence>
+
+            {/* Nodes */}
+            <AnimatePresence>
+              {words.map((word) => {
+                const isHovered = hoveredWord === word.id;
+                const isConnected = hoveredWord && word.connections.includes(hoveredWord);
+                
+                // Dim others if something is hovered, but not if it's connected
+                const isDimmed = hoveredWord && !isHovered && !isConnected;
+                
+                return (
+                  <motion.g
+                    key={word.id}
+                    initial={{ scale: 0, opacity: 0 }}
+                    animate={{ scale: 1, opacity: isDimmed ? 0.3 : 1 }}
+                    exit={{ scale: 0, opacity: 0 }}
+                    transition={{ type: "spring", stiffness: 300, damping: 20 }}
+                    className="cursor-pointer"
+                    onMouseEnter={() => setHoveredWord(word.id)}
+                    onMouseLeave={() => setHoveredWord(null)}
+                  >
+                    {/* Interaction Area (invisible but larger) */}
+                    <circle cx={word.x} cy={word.y} r={THEME.nodeBaseSize * 1.5} fill="transparent" />
+                    
+                    {/* Glow (only when hovered) */}
+                    {isHovered && (
+                      <circle 
+                        cx={word.x} cy={word.y} 
+                        r={THEME.nodeBaseSize * 1.2} 
+                        fill={word.color} 
+                        fillOpacity="0.3" 
+                        filter="url(#glow)"
+                      />
+                    )}
+
+                    {/* Core Node */}
+                    <circle 
+                      cx={word.x} cy={word.y} 
+                      r={isHovered ? THEME.nodeBaseSize * 0.8 : THEME.nodeBaseSize * 0.6} 
+                      fill="#09090b"
+                      stroke={word.color}
+                      strokeWidth={isHovered ? 3 : 2}
+                    />
+                    
+                    {/* Text Label */}
+                    <text
+                      x={word.x} 
+                      y={word.y + THEME.nodeBaseSize + 12}
+                      textAnchor="middle"
+                      fill={isHovered ? "#fff" : "#a1a1aa"}
+                      fontSize={isHovered ? 14 : 12}
+                      fontWeight={isHovered ? 600 : 400}
+                      className="pointer-events-none select-none font-mono"
+                      style={{ textShadow: "0 2px 4px rgba(0,0,0,0.8)" }}
+                    >
+                      {word.text}
+                    </text>
+                  </motion.g>
+                );
+              })}
+            </AnimatePresence>
+
+          </g>
+        </svg>
       </div>
 
-      {/* Main Content */}
-      <div className="flex-1 flex relative">
-        {/* Controls Panel */}
-        <div className="w-80 bg-zinc-950/50 backdrop-blur-sm border-r border-zinc-800 p-4 flex flex-col gap-4">
-          {/* Add Word */}
-          <div className="bg-zinc-900/50 rounded-lg p-4">
-            <h3 className="text-zinc-200 font-medium mb-3">Add Word</h3>
-            <div className="space-y-2">
-              <input
-                type="text"
-                value={inputText}
-                onChange={(e) => setInputText(e.target.value)}
-                onKeyPress={handleKeyPress}
-                className="w-full p-2 bg-zinc-800 border border-zinc-700 rounded-md focus:ring-2 focus:ring-zinc-500 focus:border-zinc-500 text-zinc-100 placeholder-zinc-500"
-                placeholder="Enter word..."
-                disabled={loading}
-              />
+      {/* --- HUD Layer --- */}
+      
+      {/* Top Bar */}
+      <header className="absolute top-0 left-0 right-0 p-4 flex justify-between items-start pointer-events-none">
+        <div className="pointer-events-auto">
+           <h1 className="text-2xl font-bold bg-gradient-to-r from-white to-zinc-500 bg-clip-text text-transparent tracking-tight">
+             Embedding Universe
+           </h1>
+           <div className="flex items-center gap-2 text-xs text-zinc-500 mt-1">
+             <span className={cn("w-2 h-2 rounded-full", initializing ? "bg-amber-500 animate-pulse" : "bg-emerald-500")} />
+             {initializing ? "Initializing Neural Engine..." : "Neural Engine Ready"}
+           </div>
+        </div>
+        
+        <div className="flex gap-2 pointer-events-auto">
+          <button 
+            onClick={() => setSidebarOpen(!sidebarOpen)}
+            className="p-2 rounded-lg bg-zinc-900/50 border border-zinc-800 hover:bg-zinc-800 transition-colors text-zinc-400 hover:text-white"
+          >
+            {sidebarOpen ? <Minimize size={18} /> : <Maximize size={18} />}
+          </button>
+          <button 
+            onClick={() => setShowHelp(!showHelp)}
+            className={cn(
+              "p-2 rounded-lg border transition-colors",
+              showHelp ? "bg-white text-black border-white" : "bg-zinc-900/50 border-zinc-800 text-zinc-400 hover:text-white"
+            )}
+          >
+            <Info size={18} />
+          </button>
+        </div>
+      </header>
+
+      {/* Sidebar / Controls */}
+      <AnimatePresence>
+        {sidebarOpen && (
+          <motion.div
+            initial={{ x: -320, opacity: 0 }}
+            animate={{ x: 0, opacity: 1 }}
+            exit={{ x: -320, opacity: 0 }}
+            transition={{ type: "spring", damping: 25, stiffness: 300 }}
+            className="absolute top-24 left-4 w-80 glass-panel rounded-xl flex flex-col overflow-hidden shadow-2xl pointer-events-auto"
+          >
+            {/* Input Section */}
+            <div className="p-4 border-b border-zinc-800/50 space-y-3">
+              <div className="relative">
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-500" size={16} />
+                <input
+                  autoFocus
+                  type="text"
+                  value={inputText}
+                  onChange={(e) => setInputText(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && addWord(inputText)}
+                  placeholder="Add a concept..."
+                  className="w-full bg-zinc-900/50 border border-zinc-700/50 rounded-lg py-2.5 pl-9 pr-3 text-sm text-white placeholder:text-zinc-600 focus:outline-none focus:ring-2 focus:ring-primary/50 focus:border-primary/50 transition-all"
+                />
+              </div>
               <button
                 onClick={() => addWord(inputText)}
                 disabled={loading || !inputText.trim()}
-                className="w-full bg-zinc-700 text-zinc-100 px-4 py-2 rounded-md hover:bg-zinc-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                className="w-full py-2 bg-white text-black rounded-lg font-medium text-sm hover:bg-zinc-200 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center justify-center gap-2"
               >
-                {loading ? (isInitializingModel ? "Init..." : "...") : "Add"}
+                {loading ? (
+                  <span className="w-4 h-4 border-2 border-black/30 border-t-black rounded-full animate-spin" />
+                ) : (
+                  <>
+                    <Plus size={16} /> Add Node
+                  </>
+                )}
               </button>
             </div>
-          </div>
 
-          {/* Stats */}
-          <div className="bg-zinc-900/50 rounded-lg p-4">
-            <h3 className="text-zinc-200 font-medium mb-3">Stats</h3>
-            <div className="text-zinc-300 text-sm space-y-1">
-              <div>Words: {words.length}</div>
-              <div>Connections: {connections.length}</div>
-              <div>Zoom: {(viewState.scale * 100).toFixed(0)}%</div>
-              {hoveredWord && (
-                <div className="text-zinc-400">
-                  Hovered: {words.find((w) => w.id === hoveredWord)?.text}
+            {/* Stats / Info */}
+            <div className="p-4 space-y-4 text-sm">
+              <div className="grid grid-cols-2 gap-2">
+                <div className="bg-zinc-900/30 p-3 rounded-lg border border-zinc-800/50">
+                   <div className="text-zinc-500 text-xs uppercase tracking-wider mb-1">Nodes</div>
+                   <div className="text-xl font-mono text-white">{words.length}</div>
                 </div>
-              )}
-            </div>
-          </div>
-
-          {/* Controls */}
-          <div className="bg-zinc-900/50 rounded-lg p-4">
-            <h3 className="text-zinc-200 font-medium mb-3">Controls</h3>
-            <div className="text-zinc-400 text-sm space-y-1">
-              <div>• Hover to highlight connections</div>
-              <div>• Drag to pan</div>
-              <div>• Scroll to zoom</div>
-              <div>• Press Enter to add word</div>
-            </div>
-          </div>
-
-          {error && (
-            <div className="bg-red-950/20 border border-red-800 rounded-lg p-4">
-              <p className="text-red-400 text-sm">Error: {error}</p>
-            </div>
-          )}
-        </div>
-
-        {/* Infinite Canvas */}
-        <div
-          ref={containerRef}
-          className="flex-1 relative cursor-grab active:cursor-grabbing"
-          onMouseDown={handleMouseDown}
-          onMouseMove={handleMouseMove}
-          onMouseUp={handleMouseUp}
-          onMouseLeave={handleMouseLeave}
-          onWheel={handleWheel}
-        >
-          <svg
-            ref={svgRef}
-            width="100%"
-            height="100%"
-            className="absolute inset-0"
-            style={{
-              cursor: isDragging ? "grabbing" : "grab",
-              touchAction: "none",
-            }}
-          >
-            {/* Background Grid */}
-            <defs>
-              <pattern
-                id="grid"
-                width="50"
-                height="50"
-                patternUnits="userSpaceOnUse"
-                patternTransform={`scale(${viewState.scale}) translate(${
-                  viewState.x / viewState.scale
-                } ${viewState.y / viewState.scale})`}
-              >
-                <path
-                  d="M 50 0 L 0 0 0 50"
-                  fill="none"
-                  stroke="rgba(161, 161, 170, 0.1)"
-                  strokeWidth="1"
-                />
-              </pattern>
-            </defs>
-            <rect width="100%" height="100%" fill="url(#grid)" />
-
-            {/* Transformed content */}
-            <g
-              transform={`translate(${viewState.x} ${viewState.y}) scale(${viewState.scale})`}
-            >
-              {/* Connection Lines */}
-              {getVisibleConnections().map((connection, index) => {
-                const fromWord = words.find((w) => w.id === connection.from);
-                const toWord = words.find((w) => w.id === connection.to);
-
-                if (!fromWord || !toWord) return null;
-
-                const connectionId = `${connection.from}-${connection.to}`;
-                const isHighlighted =
-                  hoveredWord === connection.from ||
-                  hoveredWord === connection.to;
-                const isHovered = hoveredConnection === connectionId;
-
-                // Scale visual properties based on similarity
-                const similarity = connection.similarity;
-                const lineWidth = Math.max(1, similarity * 6);
-                const opacity = Math.max(0.3, similarity * 0.8);
-
-                // Color based on similarity strength
-                const getConnectionColor = (sim: number) => {
-                  if (sim > 0.7) return "#10b981"; // Strong - emerald
-                  if (sim > 0.5) return "#3b82f6"; // Medium - blue
-                  if (sim > 0.3) return "#f59e0b"; // Weak - amber
-                  return "#64748b"; // Very weak - gray
-                };
-
-                return (
-                  <g key={index}>
-                    <line
-                      x1={fromWord.x}
-                      y1={fromWord.y}
-                      x2={toWord.x}
-                      y2={toWord.y}
-                      stroke={
-                        isHighlighted || isHovered
-                          ? "#ffffff"
-                          : getConnectionColor(similarity)
-                      }
-                      strokeWidth={
-                        isHighlighted || isHovered ? lineWidth + 2 : lineWidth
-                      }
-                      strokeOpacity={isHighlighted || isHovered ? 1 : opacity}
-                      className="transition-all duration-300 cursor-pointer"
-                      onMouseEnter={() => setHoveredConnection(connectionId)}
-                      onMouseLeave={() => setHoveredConnection(null)}
-                    />
-                    {/* Always show percentage for strong connections or when highlighted/hovered */}
-                    {(similarity > 0.5 || isHighlighted || isHovered) && (
-                      <g>
-                        {/* Background for better readability */}
-                        <rect
-                          x={(fromWord.x + toWord.x) / 2 - 15}
-                          y={(fromWord.y + toWord.y) / 2 - 18}
-                          width="30"
-                          height="16"
-                          fill="rgba(0, 0, 0, 0.8)"
-                          rx="8"
-                          className="pointer-events-none"
-                        />
-                        <text
-                          x={(fromWord.x + toWord.x) / 2}
-                          y={(fromWord.y + toWord.y) / 2 - 8}
-                          fill={
-                            isHighlighted || isHovered ? "#ffffff" : "#e4e4e7"
-                          }
-                          fontSize={isHighlighted || isHovered ? "13" : "11"}
-                          fontWeight="600"
-                          textAnchor="middle"
-                          className="font-mono transition-all duration-300 pointer-events-none"
-                          style={{
-                            filter: "drop-shadow(0 1px 2px rgba(0,0,0,0.4))",
-                          }}
-                        >
-                          {(similarity * 100).toFixed(0)}%
-                        </text>
-                      </g>
-                    )}
-                  </g>
-                );
-              })}
-
-              {/* Word Bubbles */}
-              {words.map((word) => {
-                const isHovered = hoveredWord === word.id;
-                const isConnected =
-                  hoveredWord && word.connections.includes(hoveredWord);
-                const opacity =
-                  !hoveredWord || isHovered || isConnected ? 1 : 0.25;
-                const scale = isHovered ? 1.15 : 1;
-
-                return (
-                  <g key={word.id}>
-                    {/* Glow effect when hovered */}
-                    {isHovered && (
-                      <circle
-                        cx={word.x}
-                        cy={word.y}
-                        r={35 * scale}
-                        fill={word.color}
-                        fillOpacity={0.2}
-                        className="transition-all duration-300"
-                      />
-                    )}
-                    <circle
-                      cx={word.x}
-                      cy={word.y}
-                      r={28 * scale}
-                      fill={word.color}
-                      fillOpacity={opacity}
-                      stroke={
-                        isHovered
-                          ? "#ffffff"
-                          : isConnected
-                          ? "#ffffff"
-                          : word.color
-                      }
-                      strokeWidth={isHovered ? 2.5 : isConnected ? 2 : 1.5}
-                      strokeOpacity={isHovered || isConnected ? 1 : 0.7}
-                      className="transition-all duration-300 cursor-pointer"
-                      onMouseEnter={() => setHoveredWord(word.id)}
-                      onMouseLeave={() => setHoveredWord(null)}
-                      style={{
-                        filter: isHovered
-                          ? "drop-shadow(0 0 12px rgba(255,255,255,0.5))"
-                          : isConnected
-                          ? "drop-shadow(0 0 8px rgba(255,255,255,0.3))"
-                          : "drop-shadow(0 2px 4px rgba(0,0,0,0.3))",
-                      }}
-                    />
-                    <text
-                      x={word.x}
-                      y={word.y}
-                      fill="white"
-                      fontSize={isHovered ? "14" : "12"}
-                      fontWeight="700"
-                      textAnchor="middle"
-                      dominantBaseline="middle"
-                      className="pointer-events-none select-none transition-all duration-300"
-                      fillOpacity={opacity}
-                      style={{
-                        filter: "drop-shadow(0 1px 2px rgba(0,0,0,0.8))",
-                      }}
-                    >
-                      {word.text.length > 10
-                        ? word.text.substring(0, 10) + "..."
-                        : word.text}
-                    </text>
-                  </g>
-                );
-              })}
-            </g>
-          </svg>
-
-          {/* Instructions Overlay */}
-          {showInstructions && words.length === 0 && (
-            <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-              <div className="bg-zinc-900/95 backdrop-blur-md rounded-2xl p-10 max-w-xl text-center border border-zinc-800/50 shadow-2xl">
-                <div className="w-16 h-16 mx-auto mb-6 bg-gradient-to-br from-purple-500 to-cyan-500 rounded-full flex items-center justify-center">
-                  <svg
-                    className="w-8 h-8 text-white"
-                    fill="none"
-                    stroke="currentColor"
-                    viewBox="0 0 24 24"
-                  >
-                    <path
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                      strokeWidth={2}
-                      d="M13 10V3L4 14h7v7l9-11h-7z"
-                    />
-                  </svg>
-                </div>
-                <h3 className="text-2xl font-bold text-zinc-100 mb-4">
-                  Embedding Universe
-                </h3>
-                <p className="text-zinc-300 mb-6 leading-relaxed">
-                  Explore how AI understands language by building an interactive
-                  semantic network. Powered by Transformers.js, this runs
-                  entirely in your browser with automatic fallback to Ollama for
-                  enhanced performance.
-                </p>
-                <div className="grid grid-cols-2 gap-4 text-zinc-400 text-sm mb-8">
-                  <div className="flex items-center gap-3">
-                    <div className="w-2 h-2 bg-emerald-500 rounded-full"></div>
-                    <span>Browser-based AI</span>
-                  </div>
-                  <div className="flex items-center gap-3">
-                    <div className="w-2 h-2 bg-blue-500 rounded-full"></div>
-                    <span>Live connections</span>
-                  </div>
-                  <div className="flex items-center gap-3">
-                    <div className="w-2 h-2 bg-purple-500 rounded-full"></div>
-                    <span>Hover to explore</span>
-                  </div>
-                  <div className="flex items-center gap-3">
-                    <div className="w-2 h-2 bg-amber-500 rounded-full"></div>
-                    <span>Distance = similarity</span>
-                  </div>
-                </div>
-                <div className="text-zinc-500 text-sm">
-                  Add your first word to begin exploring →
+                <div className="bg-zinc-900/30 p-3 rounded-lg border border-zinc-800/50">
+                   <div className="text-zinc-500 text-xs uppercase tracking-wider mb-1">Links</div>
+                   <div className="text-xl font-mono text-white">{connections.length}</div>
                 </div>
               </div>
+
+              {hoveredWord && (
+                 <div className="bg-primary/10 border border-primary/20 p-3 rounded-lg">
+                   <div className="text-primary text-xs uppercase tracking-wider mb-1">Selected</div>
+                   <div className="font-medium text-white flex items-center gap-2">
+                     <span className="w-2 h-2 rounded-full bg-primary" />
+                     {words.find(w => w.id === hoveredWord)?.text}
+                   </div>
+                 </div>
+              )}
             </div>
-          )}
-        </div>
+
+            {/* Actions */}
+            <div className="p-4 border-t border-zinc-800/50 flex gap-2">
+              <button 
+                onClick={resetView}
+                className="flex-1 py-2 px-3 bg-zinc-800 hover:bg-zinc-700 rounded-lg text-xs text-zinc-300 transition-colors flex items-center justify-center gap-2"
+              >
+                <RotateCcw size={14} /> Reset View
+              </button>
+              <button 
+                onClick={clearAll}
+                className="flex-1 py-2 px-3 bg-red-950/30 hover:bg-red-900/50 border border-red-900/30 rounded-lg text-xs text-red-400 transition-colors flex items-center justify-center gap-2"
+              >
+                <Trash2 size={14} /> Clear
+              </button>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Floating Controls (Bottom Right) */}
+      <div className="absolute bottom-6 right-6 flex flex-col gap-2 pointer-events-auto">
+        <button onClick={() => setViewState(v => ({...v, scale: v.scale * 1.2}))} className="p-3 bg-zinc-900 border border-zinc-800 rounded-full text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors shadow-lg">
+          <ZoomIn size={20} />
+        </button>
       </div>
+
+      {/* Help Modal Overlay */}
+      <AnimatePresence>
+        {showHelp && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="absolute inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4 pointer-events-auto"
+            onClick={() => setShowHelp(false)}
+          >
+            <motion.div
+              initial={{ scale: 0.9, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.9, opacity: 0 }}
+              onClick={e => e.stopPropagation()}
+              className="bg-zinc-950 border border-zinc-800 rounded-2xl max-w-lg w-full p-8 shadow-2xl relative overflow-hidden"
+            >
+              {/* Decorative gradient */}
+              <div className="absolute -top-24 -right-24 w-48 h-48 bg-primary/20 blur-3xl rounded-full pointer-events-none" />
+              
+              <div className="flex justify-between items-start mb-6">
+                <h2 className="text-2xl font-bold text-white">Welcome to the Universe</h2>
+                <button onClick={() => setShowHelp(false)} className="text-zinc-500 hover:text-white">
+                  <X size={24} />
+                </button>
+              </div>
+              
+              <div className="space-y-6 text-zinc-400 leading-relaxed">
+                <p>
+                  This is a semantic visualization engine. It uses an AI model running <strong className="text-white">entirely in your browser</strong> to understand the meaning of words.
+                </p>
+                
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="p-4 bg-zinc-900/50 rounded-xl border border-zinc-800">
+                    <MousePointer2 className="text-primary mb-2" size={20} />
+                    <h3 className="text-white font-medium mb-1">Interactive</h3>
+                    <p className="text-xs">Hover nodes to see connections. Drag canvas to explore.</p>
+                  </div>
+                  <div className="p-4 bg-zinc-900/50 rounded-xl border border-zinc-800">
+                    <Move className="text-emerald-400 mb-2" size={20} />
+                    <h3 className="text-white font-medium mb-1">Smart Layout</h3>
+                    <p className="text-xs">Similar concepts naturally cluster together in space.</p>
+                  </div>
+                </div>
+
+                <div className="text-sm border-t border-zinc-800 pt-6">
+                  <p>Try adding words like <span className="text-white bg-zinc-800 px-1.5 py-0.5 rounded">King</span>, <span className="text-white bg-zinc-800 px-1.5 py-0.5 rounded">Queen</span>, and <span className="text-white bg-zinc-800 px-1.5 py-0.5 rounded">Throne</span> to see how the AI groups them.</p>
+                </div>
+
+                <button 
+                  onClick={() => setShowHelp(false)}
+                  className="w-full py-3 bg-white text-black rounded-xl font-bold hover:bg-zinc-200 transition-colors"
+                >
+                  Start Exploring
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
     </div>
   );
 }
