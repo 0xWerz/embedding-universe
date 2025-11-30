@@ -2,6 +2,7 @@
 
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
+import * as d3 from "d3";
 import { 
   Maximize, 
   Minimize, 
@@ -11,30 +12,28 @@ import {
   Search, 
   Info, 
   X, 
-  Settings2,
-  Share2,
-  MousePointer2,
-  Move,
-  ZoomIn
+  ZoomIn,
+  Activity,
+  Cpu
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 // --- Types ---
 
-interface WordNode {
+interface WordNode extends d3.SimulationNodeDatum {
   id: string;
   text: string;
   embedding: number[];
-  x: number;
-  y: number;
   color: string;
-  connections: string[];
+  x?: number;
+  y?: number;
 }
 
-interface Connection {
-  from: string;
-  to: string;
+interface Connection extends d3.SimulationLinkDatum<WordNode> {
+  source: string | WordNode;
+  target: string | WordNode;
   similarity: number;
+  id: string; // source-target
 }
 
 interface ViewState {
@@ -63,7 +62,14 @@ const COLORS = [
 const THEME = {
   gridColor: "rgba(255, 255, 255, 0.03)",
   nodeBaseSize: 24,
-  nodeHoverScale: 1.2,
+};
+
+const SIMULATION_CONFIG = {
+  chargeStrength: -300,
+  linkDistanceBase: 100,
+  linkStrengthBase: 0.5,
+  collideRadius: 35,
+  alphaDecay: 0.02, // Slower decay = longer movement
 };
 
 // --- Components ---
@@ -71,26 +77,36 @@ const THEME = {
 export default function EmbeddingPage() {
   // -- State --
   const [inputText, setInputText] = useState("");
-  const [words, setWords] = useState<WordNode[]>([]);
-  const [connections, setConnections] = useState<Connection[]>([]);
   const [viewState, setViewState] = useState<ViewState>({ x: 0, y: 0, scale: 1 });
   const [hoveredWord, setHoveredWord] = useState<string | null>(null);
   const [hoveredConnection, setHoveredConnection] = useState<string | null>(null);
   
+  // Render State (Sync with D3)
+  const [nodes, setNodes] = useState<WordNode[]>([]);
+  const [links, setLinks] = useState<Connection[]>([]);
+
   // UI State
   const [loading, setLoading] = useState(false);
   const [initializing, setInitializing] = useState(false);
   const [error, setError] = useState("");
   const [showHelp, setShowHelp] = useState(true);
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [physicsActive, setPhysicsActive] = useState(false);
 
   // Interaction State
-  const [isDragging, setIsDragging] = useState(false);
+  const [isDraggingCanvas, setIsDraggingCanvas] = useState(false);
   const [dragStart, setDragStart] = useState({ x: 0, y: 0 });
 
   // Refs
   const containerRef = useRef<HTMLDivElement>(null);
+  const svgRef = useRef<SVGSVGElement>(null);
   const pipelineRef = useRef<any>(null);
+  
+  // D3 Simulation Refs
+  const simulationRef = useRef<d3.Simulation<WordNode, Connection> | null>(null);
+  // We keep mutable refs for D3 to operate on, then sync to state for React render
+  const nodesRef = useRef<WordNode[]>([]);
+  const linksRef = useRef<Connection[]>([]);
 
   // -- Initialization --
 
@@ -102,7 +118,30 @@ export default function EmbeddingPage() {
         y: clientHeight / 2,
         scale: 1,
       });
+
+      // Initialize Simulation
+      simulationRef.current = d3.forceSimulation<WordNode, Connection>()
+        .force("charge", d3.forceManyBody().strength(SIMULATION_CONFIG.chargeStrength))
+        .force("collide", d3.forceCollide().radius(SIMULATION_CONFIG.collideRadius))
+        .force("center", d3.forceCenter(0, 0).strength(0.05)) // Soft centering
+        .force("link", d3.forceLink<WordNode, Connection>()
+          .id(d => d.id)
+          .distance(link => SIMULATION_CONFIG.linkDistanceBase * (1.5 - link.similarity)) // Higher sim = shorter distance
+          .strength(link => SIMULATION_CONFIG.linkStrengthBase * link.similarity) // Higher sim = stronger pull
+        )
+        .alphaDecay(SIMULATION_CONFIG.alphaDecay)
+        .on("tick", () => {
+          // Optimization: throttle state updates if needed, but for < 100 nodes, 60fps React render is usually fine
+          // We spread to trigger re-render
+          setNodes([...nodesRef.current]);
+          setLinks([...linksRef.current]);
+        })
+        .on("end", () => setPhysicsActive(false));
     }
+
+    return () => {
+      simulationRef.current?.stop();
+    };
   }, []);
 
   // -- Logic --
@@ -130,102 +169,89 @@ export default function EmbeddingPage() {
 
   const cosineSimilarity = (a: number[], b: number[]) => {
     let dot = 0;
-    let normA = 0;
-    let normB = 0;
+    // Normalized vectors, so dot product is cosine similarity
     for (let i = 0; i < a.length; i++) {
       dot += a[i] * b[i];
-      normA += a[i] * a[i];
-      normB += b[i] * b[i];
     }
-    return dot / (Math.sqrt(normA) * Math.sqrt(normB));
+    return dot;
   };
-
-  const generatePosition = useCallback((embedding: number[], existingWords: WordNode[]) => {
-    if (existingWords.length === 0) return { x: 0, y: 0 };
-
-    const similarities = existingWords.map((word) => ({
-      word,
-      similarity: cosineSimilarity(embedding, word.embedding),
-    })).sort((a, b) => b.similarity - a.similarity);
-
-    const mostSimilar = similarities[0];
-    
-    // Create a semantic map where distance roughly correlates to dissimilarity
-    if (mostSimilar.similarity > 0.15) {
-      const normalizedSim = (mostSimilar.similarity - 0.15) / 0.85;
-      // Closer similarity = smaller distance. 
-      // We use a non-linear scale to separate clusters better
-      const distance = 400 * (1 - Math.pow(normalizedSim, 1.5)) + 60; 
-      
-      // Add randomness to angle to prevent lines
-      const angle = Math.random() * Math.PI * 2;
-      
-      return {
-        x: mostSimilar.word.x + Math.cos(angle) * distance,
-        y: mostSimilar.word.y + Math.sin(angle) * distance,
-      };
-    }
-
-    // If not similar to anything, push it far away in a random direction
-    const spread = Math.max(500, Math.sqrt(existingWords.length) * 300);
-    const angle = Math.random() * Math.PI * 2;
-    return {
-      x: Math.cos(angle) * spread,
-      y: Math.sin(angle) * spread,
-    };
-  }, []);
 
   const addWord = async (text: string) => {
     if (!text.trim()) return;
-    if (words.some(w => w.text.toLowerCase() === text.toLowerCase())) {
+    if (nodesRef.current.some(w => w.text.toLowerCase() === text.toLowerCase())) {
       setInputText(""); 
       return;
     }
 
     setLoading(true);
     setError("");
+    setPhysicsActive(true);
 
     try {
       const embedding = await getEmbedding(text);
-      const position = generatePosition(embedding, words);
-      
-      // Assign a color based on cluster/position or just cycle for now
-      // Ideally we'd do K-means but simple cycling works for visual distinction
-      const color = COLORS[words.length % COLORS.length];
+      const color = COLORS[nodesRef.current.length % COLORS.length];
+
+      // Initial position: Random nearby or center
+      const initialX = (Math.random() - 0.5) * 50;
+      const initialY = (Math.random() - 0.5) * 50;
 
       const newWord: WordNode = {
         id: Date.now().toString(),
         text,
         embedding,
-        x: position.x,
-        y: position.y,
         color,
-        connections: [],
+        x: initialX,
+        y: initialY,
       };
 
-      const newConnections: Connection[] = [];
-      
-      words.forEach(existing => {
-        const sim = cosineSimilarity(embedding, existing.embedding);
-        if (sim > 0.25) { // Connection threshold
-          newConnections.push({ from: existing.id, to: newWord.id, similarity: sim });
-          existing.connections.push(newWord.id);
-          newWord.connections.push(existing.id);
-        }
+      // --- KNN & Cluster Topology Strategy ---
+      // 1. Calculate ALL similarities first
+      const candidates = nodesRef.current.map(existing => ({
+        id: existing.id,
+        similarity: cosineSimilarity(embedding, existing.embedding)
+      }));
+
+      // 2. Sort by similarity (strongest first)
+      candidates.sort((a, b) => b.similarity - a.similarity);
+
+      // 3. Determine connections:
+      //    - Always connect to Top 3 (K=3) nearest neighbors to ensure graph connectivity
+      //    - Also connect to any other node with Similarity > 0.45 (Cluster density)
+      //    - Cap at max 8 connections per new node to prevent "super-hubs" from cluttering
+      const connectionsToMake = candidates.filter((c, index) => {
+        const isTopK = index < 3;
+        const isStrong = c.similarity > 0.45;
+        return (isTopK || isStrong) && index < 8;
       });
 
-      setWords(prev => [...prev, newWord]);
-      setConnections(prev => [...prev, ...newConnections]);
-      setInputText("");
-      
-      if (words.length === 0) {
-         // Wait for render then center
-         setTimeout(() => resetView(), 50);
+      const newLinks: Connection[] = connectionsToMake.map(c => ({
+        source: c.id,
+        target: newWord.id,
+        similarity: c.similarity,
+        id: `${c.id}-${newWord.id}`
+      }));
+
+      // Update Mutable Refs
+      nodesRef.current.push(newWord);
+      linksRef.current.push(...newLinks);
+
+      // Update Simulation
+      if (simulationRef.current) {
+        simulationRef.current.nodes(nodesRef.current);
+        
+        // Cast is necessary because d3 modifies link structure
+        const forceLink = simulationRef.current.force("link") as d3.ForceLink<WordNode, Connection>;
+        forceLink.links(linksRef.current);
+        
+        // Re-heat simulation to let new node settle
+        simulationRef.current.alpha(1).restart();
       }
+
+      setInputText("");
       
     } catch (err) {
       console.error(err);
-      setError("Failed to generate embedding. Check console.");
+      setError("Failed to generate embedding.");
     } finally {
       setLoading(false);
     }
@@ -234,15 +260,14 @@ export default function EmbeddingPage() {
   // -- Interaction Handlers --
 
   const handleMouseDown = (e: React.MouseEvent) => {
-    // Ignore clicks on UI elements (bubbled up)
     if ((e.target as HTMLElement).closest('button') || (e.target as HTMLElement).closest('input')) return;
     
-    setIsDragging(true);
+    setIsDraggingCanvas(true);
     setDragStart({ x: e.clientX - viewState.x, y: e.clientY - viewState.y });
   };
 
   const handleMouseMove = (e: React.MouseEvent) => {
-    if (isDragging) {
+    if (isDraggingCanvas) {
       setViewState(prev => ({
         ...prev,
         x: e.clientX - dragStart.x,
@@ -251,16 +276,44 @@ export default function EmbeddingPage() {
     }
   };
 
+  // D3 Node Dragging Handlers
+  const onNodeDragStart = (e: React.MouseEvent, node: WordNode) => {
+    e.stopPropagation(); // Prevent canvas drag
+    if (!simulationRef.current) return;
+    simulationRef.current.alphaTarget(0.3).restart();
+    node.fx = node.x;
+    node.fy = node.y;
+    setPhysicsActive(true);
+  };
+
+  const onNodeDrag = (e: React.MouseEvent, node: WordNode) => {
+    e.stopPropagation();
+    if (isDraggingCanvas) return; // Safety check
+
+    // We need to transform mouse coordinates back to simulation space
+    // Mouse (Screen) -> View State (Pan/Zoom) -> Simulation Space
+    const mouseX = e.clientX;
+    const mouseY = e.clientY;
+
+    node.fx = (mouseX - viewState.x) / viewState.scale;
+    node.fy = (mouseY - viewState.y) / viewState.scale;
+  };
+
+  const onNodeDragEnd = (e: React.MouseEvent, node: WordNode) => {
+    e.stopPropagation();
+    if (!simulationRef.current) return;
+    simulationRef.current.alphaTarget(0);
+    node.fx = null;
+    node.fy = null;
+  };
+
   const handleWheel = (e: React.WheelEvent) => {
     const delta = e.deltaY > 0 ? 0.9 : 1.1;
     const newScale = Math.max(0.1, Math.min(4, viewState.scale * delta));
     
-    // Zoom towards mouse pointer could be implemented here, 
-    // but center zoom is easier for now
     const rect = containerRef.current?.getBoundingClientRect();
     if (!rect) return;
 
-    // Simple center zoom correction
     const centerX = rect.width / 2;
     const centerY = rect.height / 2;
     
@@ -273,52 +326,40 @@ export default function EmbeddingPage() {
 
   const resetView = () => {
     if (!containerRef.current) return;
-    
     const { clientWidth, clientHeight } = containerRef.current;
-    
-    if (words.length === 0) {
-      setViewState({ x: clientWidth / 2, y: clientHeight / 2, scale: 1 });
-      return;
-    }
-
-    // Calculate bounding box of all words
-    const xs = words.map(w => w.x);
-    const ys = words.map(w => w.y);
-    const minX = Math.min(...xs);
-    const maxX = Math.max(...xs);
-    const minY = Math.min(...ys);
-    const maxY = Math.max(...ys);
-
-    const centerX = (minX + maxX) / 2;
-    const centerY = (minY + maxY) / 2;
-    
-    setViewState({
-      x: clientWidth / 2 - centerX,
-      y: clientHeight / 2 - centerY,
-      scale: 0.8, // Start slightly zoomed out to see context
-    });
+    setViewState({ x: clientWidth / 2, y: clientHeight / 2, scale: 0.8 });
   };
 
   const clearAll = () => {
-    setWords([]);
-    setConnections([]);
+    nodesRef.current = [];
+    linksRef.current = [];
+    if (simulationRef.current) {
+      simulationRef.current.nodes([]);
+      (simulationRef.current.force("link") as d3.ForceLink<WordNode, Connection>).links([]);
+      simulationRef.current.restart();
+    }
+    setNodes([]);
+    setLinks([]);
     setHoveredWord(null);
     resetView();
   };
 
   // -- Rendering Helpers --
 
-  // Filter connections for performance and clarity
   const visibleConnections = React.useMemo(() => {
+    // Render prioritization
     if (hoveredWord) {
-      return connections.filter(c => c.from === hoveredWord || c.to === hoveredWord);
+      return links.filter(c => 
+        (typeof c.source === 'object' ? c.source.id : c.source) === hoveredWord || 
+        (typeof c.target === 'object' ? c.target.id : c.target) === hoveredWord
+      );
     }
-    // Show only stronger connections by default to reduce noise
-    return connections.filter(c => c.similarity > 0.4); 
-  }, [connections, hoveredWord]);
+    // Since we now use KNN topology, every link is meaningful. Show them all.
+    return links; 
+  }, [links, hoveredWord]);
 
   return (
-    <div className="relative w-full h-screen bg-black text-foreground overflow-hidden font-sans">
+    <div className="relative w-full h-screen bg-black text-foreground overflow-hidden font-sans select-none">
       
       {/* --- Canvas Layer --- */}
       <div 
@@ -326,16 +367,25 @@ export default function EmbeddingPage() {
         className="absolute inset-0 cursor-grab active:cursor-grabbing"
         onMouseDown={handleMouseDown}
         onMouseMove={handleMouseMove}
-        onMouseUp={() => setIsDragging(false)}
-        onMouseLeave={() => setIsDragging(false)}
+        onMouseUp={() => setIsDraggingCanvas(false)}
+        onMouseLeave={() => setIsDraggingCanvas(false)}
         onWheel={handleWheel}
       >
-        <svg width="100%" height="100%" className="w-full h-full block touch-none">
+        <svg 
+          ref={svgRef}
+          width="100%" 
+          height="100%" 
+          className="w-full h-full block touch-none"
+        >
           <defs>
             <pattern id="grid" width="60" height="60" patternUnits="userSpaceOnUse"
               patternTransform={`scale(${viewState.scale}) translate(${viewState.x/viewState.scale} ${viewState.y/viewState.scale})`}>
               <path d="M 60 0 L 0 0 0 60" fill="none" stroke={THEME.gridColor} strokeWidth="1" />
             </pattern>
+            <radialGradient id="nodeGradient">
+              <stop offset="0%" stopColor="#fff" stopOpacity="0.9" />
+              <stop offset="100%" stopColor="#000" stopOpacity="0" />
+            </radialGradient>
             <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
               <feGaussianBlur stdDeviation="4" result="coloredBlur" />
               <feMerge>
@@ -352,26 +402,27 @@ export default function EmbeddingPage() {
             {/* Connections */}
             <AnimatePresence>
               {visibleConnections.map((conn) => {
-                 const fromNode = words.find(w => w.id === conn.from);
-                 const toNode = words.find(w => w.id === conn.to);
-                 if (!fromNode || !toNode) return null;
+                 // D3 replaces string ids with object references after simulation starts
+                 const sourceNode = conn.source as WordNode;
+                 const targetNode = conn.target as WordNode;
                  
-                 const isHovered = hoveredConnection === `${conn.from}-${conn.to}` || 
-                                   hoveredWord === conn.from || 
-                                   hoveredWord === conn.to;
+                 if (typeof sourceNode.x !== 'number' || typeof targetNode.x !== 'number') return null;
+                 
+                 const isHovered = hoveredConnection === conn.id || 
+                                   hoveredWord === sourceNode.id || 
+                                   hoveredWord === targetNode.id;
 
                  return (
                    <motion.line
-                     key={`${conn.from}-${conn.to}`}
+                     key={conn.id}
                      initial={{ opacity: 0 }}
                      animate={{ 
-                       opacity: isHovered ? 1 : Math.max(0.1, conn.similarity - 0.2),
+                       opacity: isHovered ? 0.8 : Math.max(0.1, conn.similarity - 0.2),
                        strokeWidth: isHovered ? 2 : Math.max(0.5, conn.similarity * 2)
                      }}
-                     exit={{ opacity: 0 }}
-                     x1={fromNode.x} y1={fromNode.y}
-                     x2={toNode.x} y2={toNode.y}
-                     stroke={isHovered ? "#fff" : fromNode.color}
+                     x1={sourceNode.x} y1={sourceNode.y}
+                     x2={targetNode.x} y2={targetNode.y}
+                     stroke={isHovered ? "#fff" : sourceNode.color}
                      strokeLinecap="round"
                    />
                  );
@@ -379,66 +430,74 @@ export default function EmbeddingPage() {
             </AnimatePresence>
 
             {/* Nodes */}
-            <AnimatePresence>
-              {words.map((word) => {
-                const isHovered = hoveredWord === word.id;
-                const isConnected = hoveredWord && word.connections.includes(hoveredWord);
-                
-                // Dim others if something is hovered, but not if it's connected
-                const isDimmed = hoveredWord && !isHovered && !isConnected;
-                
-                return (
-                  <motion.g
-                    key={word.id}
-                    initial={{ scale: 0, opacity: 0 }}
-                    animate={{ scale: 1, opacity: isDimmed ? 0.3 : 1 }}
-                    exit={{ scale: 0, opacity: 0 }}
-                    transition={{ type: "spring", stiffness: 300, damping: 20 }}
-                    className="cursor-pointer"
-                    onMouseEnter={() => setHoveredWord(word.id)}
-                    onMouseLeave={() => setHoveredWord(null)}
-                  >
-                    {/* Interaction Area (invisible but larger) */}
-                    <circle cx={word.x} cy={word.y} r={THEME.nodeBaseSize * 1.5} fill="transparent" />
-                    
-                    {/* Glow (only when hovered) */}
-                    {isHovered && (
-                      <circle 
-                        cx={word.x} cy={word.y} 
-                        r={THEME.nodeBaseSize * 1.2} 
-                        fill={word.color} 
-                        fillOpacity="0.3" 
-                        filter="url(#glow)"
-                      />
-                    )}
+            {nodes.map((word) => {
+              if (typeof word.x !== 'number' || typeof word.y !== 'number') return null;
 
-                    {/* Core Node */}
+              const isHovered = hoveredWord === word.id;
+              // Check connections for highlight
+              const isConnected = hoveredWord && links.some(l => 
+                ((l.source as WordNode).id === word.id && (l.target as WordNode).id === hoveredWord) ||
+                ((l.target as WordNode).id === word.id && (l.source as WordNode).id === hoveredWord)
+              );
+              
+              const isDimmed = hoveredWord && !isHovered && !isConnected;
+              
+              return (
+                <motion.g
+                  key={word.id}
+                  initial={{ scale: 0, opacity: 0 }}
+                  animate={{ 
+                    scale: 1, 
+                    opacity: isDimmed ? 0.2 : 1,
+                    x: word.x, // D3 drives position, Framer smooths it slightly
+                    y: word.y
+                  }}
+                  transition={{ duration: 0 }} // Immediate update for physics
+                  className="cursor-grab active:cursor-grabbing"
+                  onMouseEnter={() => setHoveredWord(word.id)}
+                  onMouseLeave={() => setHoveredWord(null)}
+                  onMouseDown={(e) => onNodeDragStart(e, word)}
+                  onMouseMove={(e) => {
+                    if (word.fx !== undefined && word.fx !== null) onNodeDrag(e, word);
+                  }}
+                  onMouseUp={(e) => onNodeDragEnd(e, word)}
+                >
+                  {/* Interaction Area */}
+                  <circle r={THEME.nodeBaseSize * 1.5} fill="transparent" />
+                  
+                  {/* Glow */}
+                  {isHovered && (
                     <circle 
-                      cx={word.x} cy={word.y} 
-                      r={isHovered ? THEME.nodeBaseSize * 0.8 : THEME.nodeBaseSize * 0.6} 
-                      fill="#09090b"
-                      stroke={word.color}
-                      strokeWidth={isHovered ? 3 : 2}
+                      r={THEME.nodeBaseSize * 1.2} 
+                      fill={word.color} 
+                      fillOpacity="0.3" 
+                      filter="url(#glow)"
                     />
-                    
-                    {/* Text Label */}
-                    <text
-                      x={word.x} 
-                      y={word.y + THEME.nodeBaseSize + 12}
-                      textAnchor="middle"
-                      fill={isHovered ? "#fff" : "#a1a1aa"}
-                      fontSize={isHovered ? 14 : 12}
-                      fontWeight={isHovered ? 600 : 400}
-                      className="pointer-events-none select-none font-mono"
-                      style={{ textShadow: "0 2px 4px rgba(0,0,0,0.8)" }}
-                    >
-                      {word.text}
-                    </text>
-                  </motion.g>
-                );
-              })}
-            </AnimatePresence>
+                  )}
 
+                  {/* Core Node */}
+                  <circle 
+                    r={isHovered ? THEME.nodeBaseSize * 0.7 : THEME.nodeBaseSize * 0.5} 
+                    fill="#09090b"
+                    stroke={word.color}
+                    strokeWidth={isHovered ? 3 : 2}
+                  />
+                  
+                  {/* Text Label */}
+                  <text
+                    y={THEME.nodeBaseSize + 10}
+                    textAnchor="middle"
+                    fill={isHovered ? "#fff" : "#a1a1aa"}
+                    fontSize={isHovered ? 14 : 12}
+                    fontWeight={isHovered ? 600 : 400}
+                    className="pointer-events-none select-none font-mono"
+                    style={{ textShadow: "0 2px 4px rgba(0,0,0,0.8)" }}
+                  >
+                    {word.text}
+                  </text>
+                </motion.g>
+              );
+            })}
           </g>
         </svg>
       </div>
@@ -452,8 +511,17 @@ export default function EmbeddingPage() {
              Embedding Universe
            </h1>
            <div className="flex items-center gap-2 text-xs text-zinc-500 mt-1">
-             <span className={cn("w-2 h-2 rounded-full", initializing ? "bg-amber-500 animate-pulse" : "bg-emerald-500")} />
-             {initializing ? "Initializing Neural Engine..." : "Neural Engine Ready"}
+             {initializing ? (
+               <>
+                <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
+                <span>Initializing Neural Engine...</span>
+               </>
+             ) : (
+               <>
+                <span className="w-2 h-2 rounded-full bg-emerald-500" />
+                <span>Model: all-MiniLM-L6-v2 (384d)</span>
+               </>
+             )}
            </div>
         </div>
         
@@ -520,12 +588,17 @@ export default function EmbeddingPage() {
               <div className="grid grid-cols-2 gap-2">
                 <div className="bg-zinc-900/30 p-3 rounded-lg border border-zinc-800/50">
                    <div className="text-zinc-500 text-xs uppercase tracking-wider mb-1">Nodes</div>
-                   <div className="text-xl font-mono text-white">{words.length}</div>
+                   <div className="text-xl font-mono text-white">{nodes.length}</div>
                 </div>
                 <div className="bg-zinc-900/30 p-3 rounded-lg border border-zinc-800/50">
                    <div className="text-zinc-500 text-xs uppercase tracking-wider mb-1">Links</div>
-                   <div className="text-xl font-mono text-white">{connections.length}</div>
+                   <div className="text-xl font-mono text-white">{links.length}</div>
                 </div>
+              </div>
+
+              <div className="flex items-center gap-2 text-xs text-zinc-500 bg-zinc-900/20 p-2 rounded border border-zinc-800/50">
+                <Activity size={14} className={physicsActive ? "text-emerald-500" : "text-zinc-600"} />
+                Physics Engine: {physicsActive ? "Active" : "Stable"}
               </div>
 
               {hoveredWord && (
@@ -533,7 +606,7 @@ export default function EmbeddingPage() {
                    <div className="text-primary text-xs uppercase tracking-wider mb-1">Selected</div>
                    <div className="font-medium text-white flex items-center gap-2">
                      <span className="w-2 h-2 rounded-full bg-primary" />
-                     {words.find(w => w.id === hoveredWord)?.text}
+                     {nodes.find(w => w.id === hoveredWord)?.text}
                    </div>
                  </div>
               )}
@@ -586,7 +659,7 @@ export default function EmbeddingPage() {
               <div className="absolute -top-24 -right-24 w-48 h-48 bg-primary/20 blur-3xl rounded-full pointer-events-none" />
               
               <div className="flex justify-between items-start mb-6">
-                <h2 className="text-2xl font-bold text-white">Welcome to the Universe</h2>
+                <h2 className="text-2xl font-bold text-white">High-Dimensional Projection</h2>
                 <button onClick={() => setShowHelp(false)} className="text-zinc-500 hover:text-white">
                   <X size={24} />
                 </button>
@@ -594,31 +667,36 @@ export default function EmbeddingPage() {
               
               <div className="space-y-6 text-zinc-400 leading-relaxed">
                 <p>
-                  This is a semantic visualization engine. It uses an AI model running <strong className="text-white">entirely in your browser</strong> to understand the meaning of words.
+                  You are exploring a <strong className="text-white">384-dimensional semantic space</strong> projected onto your 2D screen.
                 </p>
                 
-                <div className="grid grid-cols-2 gap-4">
-                  <div className="p-4 bg-zinc-900/50 rounded-xl border border-zinc-800">
-                    <MousePointer2 className="text-primary mb-2" size={20} />
-                    <h3 className="text-white font-medium mb-1">Interactive</h3>
-                    <p className="text-xs">Hover nodes to see connections. Drag canvas to explore.</p>
+                <div className="space-y-3">
+                  <div className="flex gap-3">
+                    <div className="p-2 bg-zinc-900 rounded-lg h-fit"><Cpu size={18} className="text-indigo-400" /></div>
+                    <div>
+                      <h3 className="text-white font-medium text-sm">Force-Directed Physics</h3>
+                      <p className="text-xs mt-1">Nodes push and pull each other based on semantic similarity. The final layout reveals hidden clusters and relationships in the data.</p>
+                    </div>
                   </div>
-                  <div className="p-4 bg-zinc-900/50 rounded-xl border border-zinc-800">
-                    <Move className="text-emerald-400 mb-2" size={20} />
-                    <h3 className="text-white font-medium mb-1">Smart Layout</h3>
-                    <p className="text-xs">Similar concepts naturally cluster together in space.</p>
+                  
+                  <div className="flex gap-3">
+                    <div className="p-2 bg-zinc-900 rounded-lg h-fit"><Activity size={18} className="text-emerald-400" /></div>
+                    <div>
+                      <h3 className="text-white font-medium text-sm">Live Simulation</h3>
+                      <p className="text-xs mt-1">The universe is alive. Adding a new concept shifts the gravity of the entire system as it finds its place among existing ideas.</p>
+                    </div>
                   </div>
                 </div>
 
                 <div className="text-sm border-t border-zinc-800 pt-6">
-                  <p>Try adding words like <span className="text-white bg-zinc-800 px-1.5 py-0.5 rounded">King</span>, <span className="text-white bg-zinc-800 px-1.5 py-0.5 rounded">Queen</span>, and <span className="text-white bg-zinc-800 px-1.5 py-0.5 rounded">Throne</span> to see how the AI groups them.</p>
+                  <p>Try adding opposing concepts like <span className="text-white font-mono">Love</span> vs <span className="text-white font-mono">Hate</span>, or related groups like <span className="text-white font-mono">Cat, Dog, Pet</span>.</p>
                 </div>
 
                 <button 
                   onClick={() => setShowHelp(false)}
                   className="w-full py-3 bg-white text-black rounded-xl font-bold hover:bg-zinc-200 transition-colors"
                 >
-                  Start Exploring
+                  Enter the Simulation
                 </button>
               </div>
             </motion.div>
