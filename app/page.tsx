@@ -366,142 +366,146 @@ export default function EmbeddingPage() {
       {/* --- Canvas Layer --- */}
       <div 
         ref={containerRef}
-        className="absolute inset-0 cursor-grab active:cursor-grabbing"
-        onMouseDown={handleMouseDown}
-        onMouseMove={handleMouseMove}
-        onMouseUp={() => setIsDraggingCanvas(false)}
-        onMouseLeave={() => setIsDraggingCanvas(false)}
-        onWheel={handleWheel}
+        className="absolute inset-0 overflow-hidden bg-black"
+        style={{ perspective: "1200px" }} // Perspective on container
       >
-        <svg 
-          ref={svgRef}
-          width="100%" 
-          height="100%" 
-          className="w-full h-full block touch-none"
-          style={{ 
-            perspective: "1000px",
-            overflow: "visible"
+        <motion.div
+          className="w-full h-full origin-center"
+          animate={{ 
+            rotateX: is3DMode ? 60 : 0, 
+            rotateZ: is3DMode ? 10 : 0,
+            scale: is3DMode ? 0.8 : 1 // Zoom out slightly in 3D mode to fit view
           }}
+          transition={{ type: "spring", duration: 1.5, bounce: 0.2 }}
+          style={{ transformStyle: "preserve-3d" }}
         >
-          <defs>
-            <pattern id="grid" width="60" height="60" patternUnits="userSpaceOnUse"
-              patternTransform={`scale(${viewState.scale}) translate(${viewState.x/viewState.scale} ${viewState.y/viewState.scale})`}>
-              <path d="M 60 0 L 0 0 0 60" fill="none" stroke={THEME.gridColor} strokeWidth="1" />
-            </pattern>
-            <radialGradient id="nodeGradient">
-              <stop offset="0%" stopColor="#fff" stopOpacity="0.9" />
-              <stop offset="100%" stopColor="#000" stopOpacity="0" />
-            </radialGradient>
-            <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
-              <feGaussianBlur stdDeviation="4" result="coloredBlur" />
-              <feMerge>
-                <feMergeNode in="coloredBlur" />
-                <feMergeNode in="SourceGraphic" />
-              </feMerge>
-            </filter>
-          </defs>
-
-          <rect width="100%" height="100%" fill="url(#grid)" />
-
-          <motion.g 
-            initial={false}
-            animate={{
-              transform: is3DMode 
-                ? `translate(${viewState.x}px, ${viewState.y}px) scale(${viewState.scale}) rotateX(45deg) rotateZ(-10deg)`
-                : `translate(${viewState.x}px, ${viewState.y}px) scale(${viewState.scale})`
-            }}
-            transition={{ type: "spring", duration: 0.8, bounce: 0.2 }}
-            style={{ transformStyle: "preserve-3d" }}
+          <svg 
+            ref={svgRef}
+            width="100%" 
+            height="100%" 
+            className="w-full h-full block touch-none"
+            onMouseDown={handleMouseDown}
+            onMouseMove={handleMouseMove}
+            onMouseUp={() => setIsDraggingCanvas(false)}
+            onMouseLeave={() => setIsDraggingCanvas(false)}
+            onWheel={handleWheel}
           >
-            
-            {/* Connections */}
-            <AnimatePresence>
-              {visibleConnections.map((conn) => {
-                 // D3 replaces string ids with object references after simulation starts
-                 const sourceNode = conn.source as WordNode;
-                 const targetNode = conn.target as WordNode;
-                 
-                 if (typeof sourceNode.x !== 'number' || typeof targetNode.x !== 'number') return null;
-                 
-                 const isHovered = hoveredConnection === conn.id || 
-                                   hoveredWord === sourceNode.id || 
-                                   hoveredWord === targetNode.id;
+            <defs>
+              <pattern id="grid" width="60" height="60" patternUnits="userSpaceOnUse"
+                patternTransform={`scale(${viewState.scale}) translate(${viewState.x/viewState.scale} ${viewState.y/viewState.scale})`}>
+                <path d="M 60 0 L 0 0 0 60" fill="none" stroke={THEME.gridColor} strokeWidth="1" />
+              </pattern>
+              <radialGradient id="nodeGradient">
+                <stop offset="0%" stopColor="#fff" stopOpacity="0.9" />
+                <stop offset="100%" stopColor="#000" stopOpacity="0" />
+              </radialGradient>
+              <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+                <feGaussianBlur stdDeviation="4" result="coloredBlur" />
+                <feMerge>
+                  <feMergeNode in="coloredBlur" />
+                  <feMergeNode in="SourceGraphic" />
+                </feMerge>
+              </filter>
+            </defs>
 
-                 return (
-                   <motion.line
-                     key={conn.id}
-                     initial={{ opacity: 0 }}
-                     animate={{ 
-                       opacity: isHovered ? 0.8 : Math.max(0.1, conn.similarity - 0.2),
-                       strokeWidth: isHovered ? 2 : Math.max(0.5, conn.similarity * 2)
-                     }}
-                     x1={sourceNode.x} y1={sourceNode.y}
-                     x2={targetNode.x} y2={targetNode.y}
-                     stroke={isHovered ? "#fff" : sourceNode.color}
-                     strokeLinecap="round"
-                   />
-                 );
-              })}
-            </AnimatePresence>
+            {/* Background Grid - Drawn separately to be part of the floor */}
+            <rect width="100%" height="100%" fill="url(#grid)" />
 
-            {/* Nodes */}
-            {nodes.map((word) => {
-              if (typeof word.x !== 'number' || typeof word.y !== 'number') return null;
-
-              const isHovered = hoveredWord === word.id;
-              // Check connections for highlight
-              const isConnected = hoveredWord && links.some(l => 
-                ((l.source as WordNode).id === word.id && (l.target as WordNode).id === hoveredWord) ||
-                ((l.target as WordNode).id === word.id && (l.source as WordNode).id === hoveredWord)
-              );
+            <motion.g 
+              initial={false}
+              animate={{
+                transform: `translate(${viewState.x}px, ${viewState.y}px) scale(${viewState.scale})`
+              }}
+              transition={{ duration: 0 }} // Instant pan/zoom response
+            >
               
-              const isDimmed = hoveredWord && !isHovered && !isConnected;
-              
-              return (
-                <motion.g
-                  key={word.id}
-                  initial={{ scale: 0, opacity: 0 }}
-                  animate={{ 
-                    scale: 1, 
-                    opacity: isDimmed ? 0.2 : 1,
-                    x: word.x, 
-                    y: word.y
-                  }}
-                  transition={{ duration: 0 }} 
-                  className="cursor-grab active:cursor-grabbing"
-                  onMouseEnter={() => setHoveredWord(word.id)}
-                  onMouseLeave={() => setHoveredWord(null)}
-                  onMouseDown={(e) => onNodeDragStart(e, word)}
-                  onMouseMove={(e) => {
-                    if (word.fx !== undefined && word.fx !== null) onNodeDrag(e, word);
-                  }}
-                  onMouseUp={(e) => onNodeDragEnd(e, word)}
-                >
-                  {/* Interaction Area */}
-                  <circle r={THEME.nodeBaseSize * 1.5} fill="transparent" />
+              {/* Connections */}
+              <AnimatePresence>
+                {visibleConnections.map((conn) => {
+                  // D3 replaces string ids with object references after simulation starts
+                  const sourceNode = conn.source as WordNode;
+                  const targetNode = conn.target as WordNode;
                   
-                  {/* Glow */}
-                  {isHovered && (
-                    <circle 
-                      r={THEME.nodeBaseSize * 1.2} 
-                      fill={word.color} 
-                      fillOpacity="0.3" 
-                      filter="url(#glow)"
+                  if (typeof sourceNode.x !== 'number' || typeof targetNode.x !== 'number') return null;
+                  
+                  const isHovered = hoveredConnection === conn.id || 
+                                    hoveredWord === sourceNode.id || 
+                                    hoveredWord === targetNode.id;
+
+                  return (
+                    <motion.line
+                      key={conn.id}
+                      initial={{ opacity: 0 }}
+                      animate={{ 
+                        opacity: isHovered ? 0.8 : Math.max(0.1, conn.similarity - 0.2),
+                        strokeWidth: isHovered ? 2 : Math.max(0.5, conn.similarity * 2)
+                      }}
+                      x1={sourceNode.x} y1={sourceNode.y}
+                      x2={targetNode.x} y2={targetNode.y}
+                      stroke={isHovered ? "#fff" : sourceNode.color}
+                      strokeLinecap="round"
                     />
-                  )}
+                  );
+                })}
+              </AnimatePresence>
 
-                  {/* Core Node */}
-                  <circle 
-                    r={isHovered ? THEME.nodeBaseSize * 0.7 : THEME.nodeBaseSize * 0.5} 
-                    fill="#09090b"
-                    stroke={word.color}
-                    strokeWidth={isHovered ? 3 : 2}
-                  />
-                  
-                  {/* Text Label */}
-                  <g transform={is3DMode ? "rotateZ(10deg) rotateX(-45deg) translate(0, -10)" : ""}>
+              {/* Nodes */}
+              {nodes.map((word) => {
+                if (typeof word.x !== 'number' || typeof word.y !== 'number') return null;
+
+                const isHovered = hoveredWord === word.id;
+                // Check connections for highlight
+                const isConnected = hoveredWord && links.some(l => 
+                  ((l.source as WordNode).id === word.id && (l.target as WordNode).id === hoveredWord) ||
+                  ((l.target as WordNode).id === word.id && (l.source as WordNode).id === hoveredWord)
+                );
+                
+                const isDimmed = hoveredWord && !isHovered && !isConnected;
+                
+                return (
+                  <motion.g
+                    key={word.id}
+                    initial={{ scale: 0, opacity: 0 }}
+                    animate={{ 
+                      scale: 1, 
+                      opacity: isDimmed ? 0.2 : 1,
+                      x: word.x, 
+                      y: word.y
+                    }}
+                    transition={{ duration: 0 }} 
+                    className="cursor-grab active:cursor-grabbing"
+                    onMouseEnter={() => setHoveredWord(word.id)}
+                    onMouseLeave={() => setHoveredWord(null)}
+                    onMouseDown={(e) => onNodeDragStart(e, word)}
+                    onMouseMove={(e) => {
+                      if (word.fx !== undefined && word.fx !== null) onNodeDrag(e, word);
+                    }}
+                    onMouseUp={(e) => onNodeDragEnd(e, word)}
+                  >
+                    {/* Interaction Area */}
+                    <circle r={THEME.nodeBaseSize * 1.5} fill="transparent" />
+                    
+                    {/* Glow */}
+                    {isHovered && (
+                      <circle 
+                        r={THEME.nodeBaseSize * 1.2} 
+                        fill={word.color} 
+                        fillOpacity="0.3" 
+                        filter="url(#glow)"
+                      />
+                    )}
+
+                    {/* Core Node */}
+                    <circle 
+                      r={isHovered ? THEME.nodeBaseSize * 0.7 : THEME.nodeBaseSize * 0.5} 
+                      fill="#09090b"
+                      stroke={word.color}
+                      strokeWidth={isHovered ? 3 : 2}
+                    />
+                    
+                    {/* Text Label */}
                     <text
-                      y={is3DMode ? 0 : THEME.nodeBaseSize + 10}
+                      y={THEME.nodeBaseSize + 10}
                       textAnchor="middle"
                       fill={isHovered ? "#fff" : "#a1a1aa"}
                       fontSize={isHovered ? 14 : 12}
@@ -511,12 +515,12 @@ export default function EmbeddingPage() {
                     >
                       {word.text}
                     </text>
-                  </g>
-                </motion.g>
-              );
-            })}
-          </motion.g>
-        </svg>
+                  </motion.g>
+                );
+              })}
+            </motion.g>
+          </svg>
+        </motion.div>
       </div>
 
       {/* --- HUD Layer --- */}
