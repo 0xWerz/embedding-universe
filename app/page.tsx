@@ -186,7 +186,7 @@ export default function EmbeddingPage() {
         setLinks([...linksRef.current]);
       });
 
-    return () => simulationRef.current?.stop();
+    return () => { simulationRef.current?.stop(); };
   }, []);
 
   // -- Logic --
@@ -366,7 +366,7 @@ export default function EmbeddingPage() {
 
   // Sync Transition: Instant during interaction, Spring during mode switch
   const dynamicTransition = isTransitioning 
-    ? { type: "spring", stiffness: 200, damping: 25 } 
+    ? { type: "spring" as const, stiffness: 200, damping: 25 } 
     : { duration: 0 };
 
   return (
