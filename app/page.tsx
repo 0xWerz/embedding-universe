@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, useRef, useMemo, useCallback } from "react";
+import React, { useState, useEffect, useRef, useMemo } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import * as d3 from "d3";
 import { 
@@ -13,12 +13,10 @@ import {
   Info, 
   X, 
   ZoomIn,
+  Box,
   Activity,
   Cpu,
-  Box,
-  Orbit,
-  Play,
-  Pause
+  Globe
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -31,13 +29,8 @@ interface WordNode extends d3.SimulationNodeDatum {
   color: string;
   x?: number;
   y?: number;
-  z: number; // True 3D depth
-  
-  // Render Cache (Computed each frame)
-  screenX?: number;
-  screenY?: number;
-  scale?: number;
-  depth?: number;
+  // 3D Properties
+  z: number; 
 }
 
 interface Connection extends d3.SimulationLinkDatum<WordNode> {
@@ -64,135 +57,132 @@ const COLORS = [
   "#A78BFA", // Violet
 ];
 
-const SIMULATION_CONFIG = {
-  chargeStrength: -250,
-  linkDistanceBase: 120,
-  linkStrengthBase: 0.4,
-  collideRadius: 30,
-  alphaDecay: 0.01, 
+const THEME = {
+  gridColor: "rgba(255, 255, 255, 0.03)",
+  nodeBaseSize: 20,
 };
 
-// --- 3D Math Helper ---
-// Simple perspective projection
-const PROJECT_FL = 800; // Focal Length
+const SIMULATION_CONFIG = {
+  chargeStrength: -200,
+  linkDistanceBase: 120,
+  linkStrengthBase: 0.4,
+  collideRadius: 25,
+  alphaDecay: 0.02,
+};
 
-const rotate3D = (x: number, y: number, z: number, angleX: number, angleY: number) => {
-  // Rotate around Y axis (Horizontal orbit)
+// --- Math Helpers ---
+
+const PROJECT_FL = 1000; // Focal length
+
+function project(
+  x: number, 
+  y: number, 
+  z: number, 
+  angleX: number, 
+  angleY: number, 
+  width: number, 
+  height: number,
+  zoom: number,
+  panX: number,
+  panY: number,
+  is3D: boolean
+) {
+  if (!is3D) {
+    // 2D Projection: Simple Pan/Zoom
+    return {
+      x: width / 2 + x * zoom + panX,
+      y: height / 2 + y * zoom + panY,
+      scale: zoom,
+      opacity: 1,
+      zIndex: 0
+    };
+  }
+
+  // 3D Projection
+  // 1. Rotate Y (Orbit horizontal)
   const cosY = Math.cos(angleY);
   const sinY = Math.sin(angleY);
   const x1 = x * cosY - z * sinY;
   const z1 = z * cosY + x * sinY;
-  
-  // Rotate around X axis (Vertical tilt)
+
+  // 2. Rotate X (Tilt vertical)
   const cosX = Math.cos(angleX);
   const sinX = Math.sin(angleX);
   const y2 = y * cosX - z1 * sinX;
   const z2 = z1 * cosX + y * sinX;
 
-  return { x: x1, y: y2, z: z2 };
-};
+  // 3. Perspective
+  // Camera is at z = -PROJECT_FL. 
+  // We push the scene back by PROJECT_FL * 1.5 to ensure it's in front of camera
+  const depth = PROJECT_FL * 1.5 - z2; 
+  const scale = (PROJECT_FL * zoom) / depth;
+  
+  return {
+    x: width / 2 + x1 * scale,
+    y: height / 2 + y2 * scale,
+    scale: scale,
+    opacity: Math.min(1, Math.max(0.2, scale)), // Fade distant nodes
+    zIndex: z2 // For sorting if needed
+  };
+}
 
 // --- Components ---
 
 export default function EmbeddingPage() {
   // -- State --
   const [inputText, setInputText] = useState("");
-  
-  // Interaction State
-  const [camera, setCamera] = useState({ angleX: -0.2, angleY: 0, zoom: 1 });
-  const [autoRotate, setAutoRotate] = useState(true);
-  const [isDragging, setIsDragging] = useState(false);
-  const [dragStart, setDragStart] = useState({ x: 0, y: 0 });
+  const [is3D, setIs3D] = useState(false);
   
   // Simulation State
   const [nodes, setNodes] = useState<WordNode[]>([]);
   const [links, setLinks] = useState<Connection[]>([]);
   const [hoveredWord, setHoveredWord] = useState<string | null>(null);
 
+  // View State
+  const [camera, setCamera] = useState({ 
+    panX: 0, panY: 0, // 2D Pan
+    zoom: 1, 
+    angleX: 0, angleY: 0 // 3D Orbit
+  });
+  
   // UI State
   const [loading, setLoading] = useState(false);
   const [initializing, setInitializing] = useState(false);
-  const [error, setError] = useState("");
-  const [showHelp, setShowHelp] = useState(true);
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [showHelp, setShowHelp] = useState(true);
+
+  // Interaction
+  const [isDragging, setIsDragging] = useState(false);
+  const [dragStart, setDragStart] = useState({ x: 0, y: 0 });
 
   // Refs
   const containerRef = useRef<HTMLDivElement>(null);
   const pipelineRef = useRef<any>(null);
   const simulationRef = useRef<d3.Simulation<WordNode, Connection> | null>(null);
-  
-  // Mutable Data (for high-freq loop)
   const nodesRef = useRef<WordNode[]>([]);
   const linksRef = useRef<Connection[]>([]);
-  const requestRef = useRef<number>();
 
   // -- Initialization --
 
   useEffect(() => {
-    // Initialize Simulation
     simulationRef.current = d3.forceSimulation<WordNode, Connection>()
       .force("charge", d3.forceManyBody().strength(SIMULATION_CONFIG.chargeStrength))
       .force("collide", d3.forceCollide().radius(SIMULATION_CONFIG.collideRadius))
-      .force("center", d3.forceCenter(0, 0).strength(0.02))
+      .force("center", d3.forceCenter(0, 0).strength(0.05))
       .force("link", d3.forceLink<WordNode, Connection>()
         .id(d => d.id)
-        .distance(link => SIMULATION_CONFIG.linkDistanceBase * (1.5 - link.similarity)) 
+        .distance(link => SIMULATION_CONFIG.linkDistanceBase * (1.5 - link.similarity))
         .strength(link => SIMULATION_CONFIG.linkStrengthBase * link.similarity)
       )
       .alphaDecay(SIMULATION_CONFIG.alphaDecay)
-      .stop(); // We step manually in the render loop
-
-    // Start Render Loop
-    const animate = () => {
-      // 1. Tick Simulation
-      if (simulationRef.current) {
-        simulationRef.current.tick();
-      }
-
-      // 2. Auto Rotate
-      if (autoRotate && !isDragging) {
-        setCamera(prev => ({ ...prev, angleY: prev.angleY + 0.002 }));
-      }
-
-      // 3. Project 3D -> 2D
-      const currentNodes = nodesRef.current;
-      const { width = 1000, height = 800 } = containerRef.current?.getBoundingClientRect() || {};
-      const cx = width / 2;
-      const cy = height / 2;
-
-      // Update cached screen coordinates for all nodes
-      currentNodes.forEach(node => {
-        if (typeof node.x !== 'number' || typeof node.y !== 'number') return;
-        
-        // Rotate
-        // We use node.x/y from D3 as world X/Y, and node.z as world Z
-        const rot = rotate3D(node.x, node.y, node.z, camera.angleX, camera.angleY);
-        
-        // Project
-        const scale = (PROJECT_FL * camera.zoom) / (PROJECT_FL * camera.zoom - rot.z + 1000); // Offset to prevent div/0
-        const screenX = cx + rot.x * scale;
-        const screenY = cy + rot.y * scale;
-
-        node.screenX = screenX;
-        node.screenY = screenY;
-        node.scale = scale;
-        node.depth = rot.z; // For sorting
+      .on("tick", () => {
+        // Sync refs to state for render
+        setNodes([...nodesRef.current]);
+        setLinks([...linksRef.current]);
       });
 
-      // Trigger React Render (throttled or full speed? React 18 handles this well usually)
-      // We create a new array reference to trigger render
-      setNodes([...currentNodes]); 
-      
-      requestRef.current = requestAnimationFrame(animate);
-    };
-
-    requestRef.current = requestAnimationFrame(animate);
-
-    return () => {
-      if (requestRef.current) cancelAnimationFrame(requestRef.current);
-      simulationRef.current?.stop();
-    };
-  }, [autoRotate, camera.angleX, camera.angleY, camera.zoom, isDragging]);
+    return () => simulationRef.current?.stop();
+  }, []);
 
   // -- Logic --
 
@@ -220,24 +210,20 @@ export default function EmbeddingPage() {
     }
 
     setLoading(true);
-    setError("");
 
     try {
       const embedding = await getEmbedding(text);
       const color = COLORS[nodesRef.current.length % COLORS.length];
-
-      // 3D Positioning Strategy:
-      // X/Y determined by D3 (semantic). 
-      // Z is random to create "Volume".
-      const z = (Math.random() - 0.5) * 600; // +/- 300 depth
+      
+      // 3D Depth Assignment (Random Volume)
+      const z = (Math.random() - 0.5) * 600; 
 
       const newWord: WordNode = {
         id: Date.now().toString(),
         text,
         embedding,
         color,
-        x: 0, y: 0, // Starts at center, physics pushes it out
-        z,
+        x: 0, y: 0, z,
       };
 
       // KNN Topology
@@ -247,7 +233,6 @@ export default function EmbeddingPage() {
       }));
       candidates.sort((a, b) => b.similarity - a.similarity);
 
-      // Top 3 + Strong matches
       const connectionsToMake = candidates.filter((c, index) => 
         (index < 3 || c.similarity > 0.45) && index < 6
       );
@@ -261,8 +246,7 @@ export default function EmbeddingPage() {
 
       nodesRef.current.push(newWord);
       linksRef.current.push(...newLinks);
-      setLinks([...linksRef.current]);
-
+      
       if (simulationRef.current) {
         simulationRef.current.nodes(nodesRef.current);
         (simulationRef.current.force("link") as d3.ForceLink<WordNode, Connection>).links(linksRef.current);
@@ -272,7 +256,6 @@ export default function EmbeddingPage() {
       setInputText("");
     } catch (err) {
       console.error(err);
-      setError("Failed to generate embedding.");
     } finally {
       setLoading(false);
     }
@@ -283,18 +266,13 @@ export default function EmbeddingPage() {
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
-
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
       const delta = e.deltaY > 0 ? 0.9 : 1.1;
-      setCamera(prev => ({ ...prev, zoom: Math.max(0.5, Math.min(3, prev.zoom * delta)) }));
+      setCamera(prev => ({ ...prev, zoom: Math.max(0.2, Math.min(5, prev.zoom * delta)) }));
     };
-
     container.addEventListener("wheel", onWheel, { passive: false });
-
-    return () => {
-      container.removeEventListener("wheel", onWheel);
-    };
+    return () => container.removeEventListener("wheel", onWheel);
   }, []);
 
   const handleMouseDown = (e: React.MouseEvent) => {
@@ -304,44 +282,90 @@ export default function EmbeddingPage() {
   };
 
   const handleMouseMove = (e: React.MouseEvent) => {
-    if (isDragging) {
-      const deltaX = e.clientX - dragStart.x;
-      const deltaY = e.clientY - dragStart.y;
-      
+    if (!isDragging) return;
+    
+    const deltaX = e.clientX - dragStart.x;
+    const deltaY = e.clientY - dragStart.y;
+
+    if (is3D) {
+      // Orbit
       setCamera(prev => ({
         ...prev,
         angleY: prev.angleY + deltaX * 0.005,
         angleX: Math.max(-Math.PI/2, Math.min(Math.PI/2, prev.angleX - deltaY * 0.005))
       }));
-      
-      setDragStart({ x: e.clientX, y: e.clientY });
+    } else {
+      // Pan
+      setCamera(prev => ({
+        ...prev,
+        panX: prev.panX + deltaX,
+        panY: prev.panY + deltaY
+      }));
     }
+    setDragStart({ x: e.clientX, y: e.clientY });
   };
-
-  // Removed handleWheel from here as it is now a native effect
 
   // -- Rendering --
 
-  // Sort for Painter's Algorithm (draw furthest first)
-  const sortedNodes = useMemo(() => {
-    return [...nodes].sort((a, b) => (a.depth || 0) - (b.depth || 0));
-  }, [nodes]);
+  const { width, height } = containerRef.current?.getBoundingClientRect() || { width: 1000, height: 800 };
 
-  const visibleLinks = useMemo(() => {
+  // Compute projected positions for all nodes
+  // This is fast enough to do in render for < 200 nodes
+  const renderedNodes = useMemo(() => {
+    return nodes.map(node => {
+      if (typeof node.x !== 'number' || typeof node.y !== 'number') return null;
+      const proj = project(
+        node.x, node.y, node.z,
+        is3D ? camera.angleX : 0,
+        is3D ? camera.angleY : 0,
+        width, height,
+        camera.zoom,
+        is3D ? 0 : camera.panX, // No pan in 3D, just orbit
+        is3D ? 0 : camera.panY,
+        is3D
+      );
+      return { ...node, proj };
+    }).filter(Boolean) as (WordNode & { proj: any })[];
+  }, [nodes, camera, is3D, width, height]);
+
+  // Sort for depth in 3D mode (Painter's algorithm)
+  const sortedRenderedNodes = useMemo(() => {
+    if (!is3D) return renderedNodes;
+    return [...renderedNodes].sort((a, b) => a.proj.zIndex - b.proj.zIndex);
+  }, [renderedNodes, is3D]);
+
+  const renderedLinks = useMemo(() => {
     return links.map(link => {
-      const source = nodes.find(n => n.id === (link.source as WordNode).id || n.id === link.source);
-      const target = nodes.find(n => n.id === (link.target as WordNode).id || n.id === link.target);
+      const source = sortedRenderedNodes.find(n => n.id === (link.source as WordNode).id || n.id === link.source);
+      const target = sortedRenderedNodes.find(n => n.id === (link.target as WordNode).id || n.id === link.target);
+      if (!source || !target) return null;
       return { ...link, source, target };
-    }).filter(l => l.source && l.target);
-  }, [links, nodes]);
+    }).filter(Boolean) as any[];
+  }, [links, sortedRenderedNodes]);
+
+  const handleReset = () => {
+    setCamera({ panX: 0, panY: 0, zoom: 1, angleX: 0, angleY: 0 });
+  };
+
+  const clearAll = () => {
+    nodesRef.current = [];
+    linksRef.current = [];
+    if (simulationRef.current) {
+      simulationRef.current.nodes([]);
+      simulationRef.current.restart();
+    }
+    setNodes([]);
+    setLinks([]);
+    handleReset();
+  };
 
   return (
     <div className="relative w-full h-screen bg-black text-foreground overflow-hidden font-sans select-none">
       
-      {/* --- 3D Viewport --- */}
+      {/* --- Canvas --- */}
       <div 
         ref={containerRef}
-        className="absolute inset-0 cursor-move active:cursor-grabbing"
+        className={cn("absolute inset-0", isDragging ? "cursor-grabbing" : "cursor-grab")}
         onMouseDown={handleMouseDown}
         onMouseMove={handleMouseMove}
         onMouseUp={() => setIsDragging(false)}
@@ -349,106 +373,117 @@ export default function EmbeddingPage() {
       >
         <svg width="100%" height="100%" className="block">
           <defs>
-             <radialGradient id="star-glow">
-               <stop offset="0%" stopColor="white" stopOpacity="1" />
+             <radialGradient id="node-glow">
+               <stop offset="0%" stopColor="white" stopOpacity="0.8" />
                <stop offset="100%" stopColor="transparent" stopOpacity="0" />
              </radialGradient>
           </defs>
-          
-          {/* Background Stars (Static or Parallax? Static for now) */}
-          <rect width="100%" height="100%" fill="#050505" />
-          
-          {/* Links (Lines) */}
-          {visibleLinks.map((link, i) => {
-            const s = link.source as WordNode;
-            const t = link.target as WordNode;
+
+          {/* Grid (2D only) */}
+          <motion.g 
+            initial={false}
+            animate={{ opacity: is3D ? 0 : 0.2 }}
+            transition={{ duration: 0.5 }}
+          >
+            <pattern id="grid" width="60" height="60" patternUnits="userSpaceOnUse"
+              patternTransform={`scale(${camera.zoom}) translate(${camera.panX} ${camera.panY})`}>
+              <path d="M 60 0 L 0 0 0 60" fill="none" stroke="#fff" strokeWidth="1" />
+            </pattern>
+            <rect width="100%" height="100%" fill="url(#grid)" />
+          </motion.g>
+
+          {/* Links */}
+          {renderedLinks.map((link, i) => {
+            const isHovered = hoveredWord === link.source.id || hoveredWord === link.target.id;
+            // Don't show non-hovered links in 3D if there are too many, to reduce clutter? No, show them.
+            const opacity = Math.max(0.1, link.similarity - 0.2) * (is3D ? 0.6 : 1);
             
-            if (!s.screenX || !t.screenX) return null;
-
-            // Average depth for sorting (simplified: just draw lines behind nodes usually)
-            const opacity = Math.max(0.1, link.similarity - 0.2) * (hoveredWord ? 0.2 : 0.6);
-            const isHovered = hoveredWord === s.id || hoveredWord === t.id;
-
             return (
-              <line 
-                key={i}
-                x1={s.screenX} y1={s.screenY}
-                x2={t.screenX} y2={t.screenY}
-                stroke={isHovered ? "#fff" : s.color}
+              <motion.line
+                key={link.id}
+                animate={{
+                  x1: link.source.proj.x, y1: link.source.proj.y,
+                  x2: link.target.proj.x, y2: link.target.proj.y,
+                }}
+                transition={{ type: "spring", stiffness: 200, damping: 25 }}
+                stroke={isHovered ? "#fff" : link.source.color}
                 strokeWidth={isHovered ? 2 : 1}
                 strokeOpacity={isHovered ? 0.8 : opacity}
               />
             );
           })}
 
-          {/* Nodes (Sorted by Depth) */}
-          {sortedNodes.map(node => {
-            if (!node.screenX) return null;
-            
-            const scale = node.scale || 1;
+          {/* Nodes */}
+          {sortedRenderedNodes.map(node => {
             const isHovered = hoveredWord === node.id;
+            const baseSize = THEME.nodeBaseSize * node.proj.scale;
             
-            // Scale down based on distance
-            const size = 20 * scale; 
-            const fontSize = (isHovered ? 14 : 10) * scale;
-
             return (
-              <g 
-                key={node.id} 
-                transform={`translate(${node.screenX}, ${node.screenY})`}
-                onMouseEnter={() => { setHoveredWord(node.id); setAutoRotate(false); }}
-                onMouseLeave={() => { setHoveredWord(null); setAutoRotate(true); }}
+              <motion.g
+                key={node.id}
+                animate={{
+                  x: node.proj.x,
+                  y: node.proj.y,
+                }}
+                transition={{ type: "spring", stiffness: 200, damping: 25 }} // Smooths the 2D->3D transition
+                onMouseEnter={() => setHoveredWord(node.id)}
+                onMouseLeave={() => setHoveredWord(null)}
                 className="cursor-pointer"
               >
                 {/* Glow */}
-                {isHovered && <circle r={size * 2} fill="url(#star-glow)" opacity="0.5" />}
+                {isHovered && (
+                   <circle r={baseSize * 1.5} fill="url(#node-glow)" />
+                )}
                 
                 {/* Core */}
-                <circle 
-                  r={size / 2} 
-                  fill="#000" 
-                  stroke={node.color} 
-                  strokeWidth={2 * scale}
+                <motion.circle 
+                  animate={{ r: isHovered ? baseSize * 0.6 : baseSize * 0.4 }}
+                  fill="#000"
+                  stroke={node.color}
+                  strokeWidth={2 * node.proj.scale}
                 />
-                
+
                 {/* Label */}
-                <text
-                  y={size + 5 * scale}
+                <motion.text
+                  animate={{ y: baseSize + 10 * node.proj.scale }}
                   textAnchor="middle"
                   fill={isHovered ? "#fff" : "#888"}
-                  fontSize={fontSize}
-                  fontWeight={isHovered ? "bold" : "normal"}
-                  style={{ textShadow: "0 1px 4px rgba(0,0,0,1)" }}
+                  fontSize={(isHovered ? 14 : 10) * node.proj.scale}
+                  fontWeight={isHovered ? 600 : 400}
+                  style={{ textShadow: "0 2px 4px rgba(0,0,0,1)" }}
                 >
                   {node.text}
-                </text>
-              </g>
+                </motion.text>
+              </motion.g>
             );
           })}
         </svg>
       </div>
 
       {/* --- HUD --- */}
-      <header className="absolute top-0 left-0 right-0 p-4 flex justify-between items-start pointer-events-none">
-        <div className="pointer-events-auto backdrop-blur-md bg-black/30 p-2 rounded-lg border border-white/10">
-           <h1 className="text-xl font-bold text-white tracking-tight flex items-center gap-2">
-             <Orbit size={20} className="text-purple-500" />
-             Embedding Universe <span className="text-xs font-normal text-zinc-500 px-2 border-l border-zinc-700">3D Projection Engine</span>
+      
+      {/* Header */}
+      <div className="absolute top-0 left-0 right-0 p-4 flex justify-between items-start pointer-events-none">
+        <div className="pointer-events-auto">
+           <h1 className="text-2xl font-bold text-white tracking-tight">
+             Embedding Universe
            </h1>
+           <div className="flex items-center gap-2 text-xs text-zinc-500 mt-1">
+             <span className={cn("w-2 h-2 rounded-full", initializing ? "bg-amber-500 animate-pulse" : "bg-emerald-500")} />
+             {initializing ? "Initializing..." : "Ready"}
+             <span className="border-l border-zinc-800 pl-2 ml-2">{is3D ? "Volumetric Mode" : "2D Graph Mode"}</span>
+           </div>
         </div>
         
         <div className="flex gap-2 pointer-events-auto">
-          <button 
-            onClick={() => setSidebarOpen(!sidebarOpen)}
-            className="p-2 rounded-lg bg-zinc-900/80 border border-zinc-800 hover:bg-zinc-800 text-zinc-400 hover:text-white"
-          >
-            {sidebarOpen ? <Minimize size={18} /> : <Maximize size={18} />}
+          <button onClick={() => setSidebarOpen(!sidebarOpen)} className="p-2 bg-zinc-900 border border-zinc-800 rounded-lg text-zinc-400 hover:text-white">
+             {sidebarOpen ? <Minimize size={18}/> : <Maximize size={18}/>}
           </button>
-          <button onClick={() => setShowHelp(!showHelp)} className="p-2 rounded-lg bg-zinc-900/80 border border-zinc-800 text-zinc-400 hover:text-white">
-            <Info size={18} />
+          <button onClick={() => setShowHelp(!showHelp)} className="p-2 bg-zinc-900 border border-zinc-800 rounded-lg text-zinc-400 hover:text-white">
+             <Info size={18}/>
           </button>
         </div>
-      </header>
+      </div>
 
       {/* Sidebar */}
       <AnimatePresence>
@@ -457,10 +492,11 @@ export default function EmbeddingPage() {
             initial={{ x: -320, opacity: 0 }}
             animate={{ x: 0, opacity: 1 }}
             exit={{ x: -320, opacity: 0 }}
-            className="absolute top-20 left-4 w-80 bg-zinc-950/80 backdrop-blur-xl border border-zinc-800 rounded-xl shadow-2xl pointer-events-auto overflow-hidden"
+            className="absolute top-24 left-4 w-80 glass-panel rounded-xl flex flex-col overflow-hidden shadow-2xl pointer-events-auto bg-zinc-950/80 backdrop-blur-md border border-zinc-800"
           >
-            <div className="p-4 space-y-3">
+            <div className="p-4 border-b border-zinc-800/50 space-y-3">
               <div className="relative">
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-500" size={16} />
                 <input
                   autoFocus
                   type="text"
@@ -468,59 +504,88 @@ export default function EmbeddingPage() {
                   onChange={(e) => setInputText(e.target.value)}
                   onKeyDown={(e) => e.key === 'Enter' && addWord(inputText)}
                   placeholder="Add concept..."
-                  className="w-full bg-black/50 border border-zinc-700 rounded-lg py-2 px-3 text-white focus:outline-none focus:border-purple-500 transition-colors"
+                  className="w-full bg-zinc-900/50 border border-zinc-700/50 rounded-lg py-2.5 pl-9 pr-3 text-sm text-white placeholder:text-zinc-600 focus:outline-none focus:ring-2 focus:ring-purple-500/50 transition-all"
                 />
-                {loading && <div className="absolute right-3 top-2.5 w-4 h-4 border-2 border-purple-500 border-t-transparent rounded-full animate-spin" />}
               </div>
-              <div className="text-xs text-zinc-500 flex justify-between px-1">
-                <span>{nodes.length} Nodes</span>
-                <span>{links.length} Connections</span>
-              </div>
+              <button
+                onClick={() => addWord(inputText)}
+                disabled={loading || !inputText.trim()}
+                className="w-full py-2 bg-white text-black rounded-lg font-medium text-sm hover:bg-zinc-200 disabled:opacity-50 transition-colors flex items-center justify-center gap-2"
+              >
+                {loading ? <span className="w-4 h-4 border-2 border-black/30 border-t-black rounded-full animate-spin" /> : <><Plus size={16} /> Add Node</>}
+              </button>
+            </div>
+
+            <div className="p-4 space-y-2 text-sm">
+               <div className="flex justify-between text-zinc-500 text-xs uppercase">
+                  <span>Nodes: {nodes.length}</span>
+                  <span>Links: {links.length}</span>
+               </div>
+               {hoveredWord && (
+                 <div className="p-2 bg-purple-900/20 border border-purple-500/30 rounded text-purple-200 text-xs">
+                   Selected: {nodes.find(n => n.id === hoveredWord)?.text}
+                 </div>
+               )}
             </div>
             
-            <div className="border-t border-zinc-800 p-2 flex gap-2">
-               <button onClick={() => { setNodes([]); setLinks([]); }} className="flex-1 py-1.5 bg-red-900/20 text-red-400 text-xs rounded hover:bg-red-900/40">
-                 Clear Universe
-               </button>
-               <button 
-                 onClick={() => setAutoRotate(!autoRotate)} 
-                 className={cn("flex-1 py-1.5 text-xs rounded flex items-center justify-center gap-2", autoRotate ? "bg-purple-900/30 text-purple-300" : "bg-zinc-800 text-zinc-400")}
-               >
-                 {autoRotate ? <Pause size={12}/> : <Play size={12}/>} Rotate
-               </button>
+            <div className="p-4 border-t border-zinc-800/50 flex gap-2">
+              <button onClick={handleReset} className="flex-1 py-2 bg-zinc-800 hover:bg-zinc-700 rounded-lg text-xs text-zinc-300 transition-colors flex items-center justify-center gap-2"><RotateCcw size={14}/> Reset</button>
+              <button onClick={clearAll} className="flex-1 py-2 bg-red-950/30 hover:bg-red-900/50 border border-red-900/30 rounded-lg text-xs text-red-400 transition-colors flex items-center justify-center gap-2"><Trash2 size={14}/> Clear</button>
             </div>
           </motion.div>
         )}
       </AnimatePresence>
 
-      {/* Help Overlay */}
+      {/* View Controls */}
+      <div className="absolute bottom-6 right-6 flex flex-col gap-2 pointer-events-auto">
+        <button 
+          onClick={() => { setIs3D(!is3D); handleReset(); }} 
+          className={cn(
+            "p-3 border rounded-full transition-all shadow-lg",
+            is3D 
+              ? "bg-purple-600 text-white border-purple-500" 
+              : "bg-zinc-900 text-zinc-400 border-zinc-800 hover:text-white hover:bg-zinc-800"
+          )}
+          title={is3D ? "Switch to 2D" : "Switch to 3D"}
+        >
+          {is3D ? <Globe size={20} /> : <Box size={20} />}
+        </button>
+        <button onClick={() => setCamera(c => ({...c, zoom: c.zoom * 1.2}))} className="p-3 bg-zinc-900 border border-zinc-800 rounded-full text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors shadow-lg">
+          <ZoomIn size={20} />
+        </button>
+      </div>
+
+      {/* Help Modal */}
       <AnimatePresence>
         {showHelp && (
           <motion.div
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            className="absolute inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 pointer-events-auto"
+            className="absolute inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4 pointer-events-auto"
             onClick={() => setShowHelp(false)}
           >
-            <div className="max-w-md text-center space-y-6">
-              <div className="w-20 h-20 mx-auto bg-gradient-to-br from-purple-500 to-blue-500 rounded-full flex items-center justify-center shadow-[0_0_40px_rgba(168,85,247,0.4)]">
-                <Orbit size={40} className="text-white" />
-              </div>
-              <h2 className="text-3xl font-bold text-white">Volumetric Semantic Space</h2>
-              <p className="text-zinc-400 leading-relaxed">
-                Welcome to the 3D Embedding Universe.
-                <br/><br/>
-                • <strong className="text-white">Orbit</strong> by dragging the background.
-                <br/>
-                • <strong className="text-white">Zoom</strong> with your mouse wheel.
-                <br/>
-                • <strong className="text-white">Hover</strong> nodes to pause rotation.
-              </p>
-              <button className="px-8 py-3 bg-white text-black rounded-full font-bold hover:bg-zinc-200 transition-colors">
-                Enter Void
-              </button>
-            </div>
+            <motion.div
+              initial={{ scale: 0.9 }}
+              animate={{ scale: 1 }}
+              className="bg-zinc-950 border border-zinc-800 rounded-2xl max-w-md w-full p-8 shadow-2xl text-center space-y-6"
+              onClick={e => e.stopPropagation()}
+            >
+               <div className="w-16 h-16 mx-auto bg-gradient-to-br from-purple-500 to-cyan-500 rounded-full flex items-center justify-center">
+                 <Activity className="text-white" size={32} />
+               </div>
+               <h2 className="text-2xl font-bold text-white">Embedding Universe</h2>
+               <p className="text-zinc-400">
+                 Visualizing language in N-dimensional space.
+                 <br/><br/>
+                 <span className="text-white">2D Mode:</span> Pan/Zoom flat graph.
+                 <br/>
+                 <span className="text-white">3D Mode:</span> Orbit volumetric cloud.
+               </p>
+               <button onClick={() => setShowHelp(false)} className="px-6 py-2 bg-white text-black rounded-lg font-medium hover:bg-zinc-200">
+                 Start Exploring
+               </button>
+            </motion.div>
           </motion.div>
         )}
       </AnimatePresence>
