@@ -136,6 +136,7 @@ export default function EmbeddingPage() {
   // -- State --
   const [inputText, setInputText] = useState("");
   const [is3D, setIs3D] = useState(false);
+  const [isTransitioning, setIsTransitioning] = useState(false);
   
   // Simulation State
   const [nodes, setNodes] = useState<WordNode[]>([]);
@@ -363,6 +364,11 @@ export default function EmbeddingPage() {
     handleReset();
   };
 
+  // Sync Transition: Instant during interaction, Spring during mode switch
+  const dynamicTransition = isTransitioning 
+    ? { type: "spring", stiffness: 200, damping: 25 } 
+    : { duration: 0 };
+
   return (
     <div className="relative w-full h-screen bg-black text-foreground overflow-hidden font-sans select-none">
       
@@ -398,7 +404,7 @@ export default function EmbeddingPage() {
                   x1: link.source.proj.x, y1: link.source.proj.y,
                   x2: link.target.proj.x, y2: link.target.proj.y,
                 }}
-                transition={{ type: "spring", stiffness: 200, damping: 25 }}
+                transition={dynamicTransition}
                 stroke={isHovered ? "#fff" : link.source.color}
                 strokeWidth={isHovered ? 2 : 1}
                 strokeOpacity={isHovered ? 0.8 : opacity}
@@ -418,7 +424,7 @@ export default function EmbeddingPage() {
                   x: node.proj.x,
                   y: node.proj.y,
                 }}
-                transition={{ type: "spring", stiffness: 200, damping: 25 }} // Smooths the 2D->3D transition
+                transition={dynamicTransition} // Smooths the 2D->3D transition
                 onMouseEnter={() => setHoveredWord(node.id)}
                 onMouseLeave={() => setHoveredWord(null)}
                 className="cursor-pointer"
@@ -532,7 +538,12 @@ export default function EmbeddingPage() {
       {/* View Controls */}
       <div className="absolute bottom-6 right-6 flex flex-col gap-2 pointer-events-auto">
         <button 
-          onClick={() => { setIs3D(!is3D); handleReset(); }} 
+          onClick={() => { 
+            setIsTransitioning(true);
+            setIs3D(!is3D); 
+            handleReset();
+            setTimeout(() => setIsTransitioning(false), 600);
+          }} 
           className={cn(
             "p-3 border rounded-full transition-all shadow-lg",
             is3D 
