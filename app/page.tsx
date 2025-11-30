@@ -14,7 +14,8 @@ import {
   X, 
   ZoomIn,
   Activity,
-  Cpu
+  Cpu,
+  Box
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -80,6 +81,7 @@ export default function EmbeddingPage() {
   const [viewState, setViewState] = useState<ViewState>({ x: 0, y: 0, scale: 1 });
   const [hoveredWord, setHoveredWord] = useState<string | null>(null);
   const [hoveredConnection, setHoveredConnection] = useState<string | null>(null);
+  const [is3DMode, setIs3DMode] = useState(false);
   
   // Render State (Sync with D3)
   const [nodes, setNodes] = useState<WordNode[]>([]);
@@ -376,6 +378,10 @@ export default function EmbeddingPage() {
           width="100%" 
           height="100%" 
           className="w-full h-full block touch-none"
+          style={{ 
+            perspective: "1000px",
+            overflow: "visible"
+          }}
         >
           <defs>
             <pattern id="grid" width="60" height="60" patternUnits="userSpaceOnUse"
@@ -397,7 +403,16 @@ export default function EmbeddingPage() {
 
           <rect width="100%" height="100%" fill="url(#grid)" />
 
-          <g transform={`translate(${viewState.x}, ${viewState.y}) scale(${viewState.scale})`}>
+          <motion.g 
+            initial={false}
+            animate={{
+              transform: is3DMode 
+                ? `translate(${viewState.x}px, ${viewState.y}px) scale(${viewState.scale}) rotateX(45deg) rotateZ(-10deg)`
+                : `translate(${viewState.x}px, ${viewState.y}px) scale(${viewState.scale})`
+            }}
+            transition={{ type: "spring", duration: 0.8, bounce: 0.2 }}
+            style={{ transformStyle: "preserve-3d" }}
+          >
             
             {/* Connections */}
             <AnimatePresence>
@@ -449,10 +464,10 @@ export default function EmbeddingPage() {
                   animate={{ 
                     scale: 1, 
                     opacity: isDimmed ? 0.2 : 1,
-                    x: word.x, // D3 drives position, Framer smooths it slightly
+                    x: word.x, 
                     y: word.y
                   }}
-                  transition={{ duration: 0 }} // Immediate update for physics
+                  transition={{ duration: 0 }} 
                   className="cursor-grab active:cursor-grabbing"
                   onMouseEnter={() => setHoveredWord(word.id)}
                   onMouseLeave={() => setHoveredWord(null)}
@@ -484,21 +499,23 @@ export default function EmbeddingPage() {
                   />
                   
                   {/* Text Label */}
-                  <text
-                    y={THEME.nodeBaseSize + 10}
-                    textAnchor="middle"
-                    fill={isHovered ? "#fff" : "#a1a1aa"}
-                    fontSize={isHovered ? 14 : 12}
-                    fontWeight={isHovered ? 600 : 400}
-                    className="pointer-events-none select-none font-mono"
-                    style={{ textShadow: "0 2px 4px rgba(0,0,0,0.8)" }}
-                  >
-                    {word.text}
-                  </text>
+                  <g transform={is3DMode ? "rotateZ(10deg) rotateX(-45deg) translate(0, -10)" : ""}>
+                    <text
+                      y={is3DMode ? 0 : THEME.nodeBaseSize + 10}
+                      textAnchor="middle"
+                      fill={isHovered ? "#fff" : "#a1a1aa"}
+                      fontSize={isHovered ? 14 : 12}
+                      fontWeight={isHovered ? 600 : 400}
+                      className="pointer-events-none select-none font-mono"
+                      style={{ textShadow: "0 2px 4px rgba(0,0,0,0.8)" }}
+                    >
+                      {word.text}
+                    </text>
+                  </g>
                 </motion.g>
               );
             })}
-          </g>
+          </motion.g>
         </svg>
       </div>
 
@@ -633,6 +650,18 @@ export default function EmbeddingPage() {
 
       {/* Floating Controls (Bottom Right) */}
       <div className="absolute bottom-6 right-6 flex flex-col gap-2 pointer-events-auto">
+        <button 
+          onClick={() => setIs3DMode(!is3DMode)} 
+          className={cn(
+            "p-3 border rounded-full transition-all shadow-lg",
+            is3DMode 
+              ? "bg-primary text-white border-primary" 
+              : "bg-zinc-900 text-zinc-400 border-zinc-800 hover:text-white hover:bg-zinc-800"
+          )}
+          title="Toggle 3D Mode"
+        >
+          <Box size={20} />
+        </button>
         <button onClick={() => setViewState(v => ({...v, scale: v.scale * 1.2}))} className="p-3 bg-zinc-900 border border-zinc-800 rounded-full text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors shadow-lg">
           <ZoomIn size={20} />
         </button>
