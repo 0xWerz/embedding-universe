@@ -280,6 +280,23 @@ export default function EmbeddingPage() {
 
   // -- Interaction --
 
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      const delta = e.deltaY > 0 ? 0.9 : 1.1;
+      setCamera(prev => ({ ...prev, zoom: Math.max(0.5, Math.min(3, prev.zoom * delta)) }));
+    };
+
+    container.addEventListener("wheel", onWheel, { passive: false });
+
+    return () => {
+      container.removeEventListener("wheel", onWheel);
+    };
+  }, []);
+
   const handleMouseDown = (e: React.MouseEvent) => {
     if ((e.target as HTMLElement).closest('button') || (e.target as HTMLElement).closest('input')) return;
     setIsDragging(true);
@@ -301,10 +318,7 @@ export default function EmbeddingPage() {
     }
   };
 
-  const handleWheel = (e: React.WheelEvent) => {
-    const delta = e.deltaY > 0 ? 0.9 : 1.1;
-    setCamera(prev => ({ ...prev, zoom: Math.max(0.5, Math.min(3, prev.zoom * delta)) }));
-  };
+  // Removed handleWheel from here as it is now a native effect
 
   // -- Rendering --
 
@@ -332,7 +346,6 @@ export default function EmbeddingPage() {
         onMouseMove={handleMouseMove}
         onMouseUp={() => setIsDragging(false)}
         onMouseLeave={() => setIsDragging(false)}
-        onWheel={handleWheel}
       >
         <svg width="100%" height="100%" className="block">
           <defs>
