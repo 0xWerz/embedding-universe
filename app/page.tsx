@@ -72,7 +72,7 @@ const SIMULATION_CONFIG = {
 
 // --- Math Helpers ---
 
-const PROJECT_FL = 1000; // Focal length
+const PROJECT_FL = 1200; // Increased focal length for flatter, less distorted 3D view
 
 function project(
   x: number, 
@@ -87,18 +87,21 @@ function project(
   panY: number,
   is3D: boolean
 ) {
+  const cx = width / 2;
+  const cy = height / 2;
+
   if (!is3D) {
-    // 2D Projection: Simple Pan/Zoom
+    // 2D Projection: Simple Pan/Zoom relative to center + offset
     return {
-      x: width / 2 + x * zoom + panX,
-      y: height / 2 + y * zoom + panY,
+      x: cx + x * zoom + panX,
+      y: cy + y * zoom + panY,
       scale: zoom,
       opacity: 1,
       zIndex: 0
     };
   }
 
-  // 3D Projection
+  // 3D Projection (Volumetric)
   // 1. Rotate Y (Orbit horizontal)
   const cosY = Math.cos(angleY);
   const sinY = Math.sin(angleY);
@@ -111,18 +114,19 @@ function project(
   const y2 = y * cosX - z1 * sinX;
   const z2 = z1 * cosX + y * sinX;
 
-  // 3. Perspective
-  // Camera is at z = -PROJECT_FL. 
-  // We push the scene back by PROJECT_FL * 1.5 to ensure it's in front of camera
-  const depth = PROJECT_FL * 1.5 - z2; 
-  const scale = (PROJECT_FL * zoom) / depth;
+  // 3. Perspective Projection
+  // We ignore panX/panY in 3D mode to ensure rotation is always around the universe center
+  const depth = PROJECT_FL - z2; 
+  // Prevent division by zero or negative depth behind camera
+  const safeDepth = Math.max(10, depth);
+  const scale = (PROJECT_FL * zoom) / safeDepth;
   
   return {
-    x: width / 2 + x1 * scale,
-    y: height / 2 + y2 * scale,
+    x: cx + x1 * scale,
+    y: cy + y2 * scale,
     scale: scale,
-    opacity: Math.min(1, Math.max(0.2, scale)), // Fade distant nodes
-    zIndex: z2 // For sorting if needed
+    opacity: Math.min(1, Math.max(0.2, scale)), // Depth cueing (fog)
+    zIndex: z2 
   };
 }
 
