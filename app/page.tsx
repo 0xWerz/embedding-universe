@@ -383,18 +383,7 @@ export default function EmbeddingPage() {
              </radialGradient>
           </defs>
 
-          {/* Grid (2D only) */}
-          <motion.g 
-            initial={false}
-            animate={{ opacity: is3D ? 0 : 0.2 }}
-            transition={{ duration: 0.5 }}
-          >
-            <pattern id="grid" width="60" height="60" patternUnits="userSpaceOnUse"
-              patternTransform={`scale(${camera.zoom}) translate(${camera.panX} ${camera.panY})`}>
-              <path d="M 60 0 L 0 0 0 60" fill="none" stroke="#fff" strokeWidth="1" />
-            </pattern>
-            <rect width="100%" height="100%" fill="url(#grid)" />
-          </motion.g>
+          {/* Grid removed per user request */}
 
           {/* Links */}
           {renderedLinks.map((link, i) => {
